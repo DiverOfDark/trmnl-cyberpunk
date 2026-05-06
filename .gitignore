@@ -1,0 +1,5 @@
+/target
+fonts/*.ttf
+fonts/*.woff2
+fonts/*.zip
+.env

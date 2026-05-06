@@ -1,0 +1,16 @@
+apiVersion: v2
+name: trmnl-seedbox
+description: Neo-Tokyo TRMNL BYOS dashboard server for the Seeed e1002 e-ink display
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - trmnl
+  - e-ink
+  - homelab
+  - dashboard
+sources:
+  - https://github.com/DiverOfDark/trmnl-seedbox
+maintainers:
+  - name: DiverOfDark
+    url: https://github.com/DiverOfDark

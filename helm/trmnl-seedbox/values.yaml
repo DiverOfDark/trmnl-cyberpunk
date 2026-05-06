@@ -1,0 +1,58 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/diverofdark/trmnl-seedbox
+  pullPolicy: Always
+  # Overrides the image tag (defaults to Chart.appVersion)
+  tag: ""
+
+imagePullSecrets: []
+
+serviceAccount:
+  create: false
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: trmnl.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+# Base URL the TRMNL device will use to fetch images — must be reachable from the device.
+# Set to your node/ingress/LoadBalancer address.
+baseUrl: "http://trmnl-seedbox:8080"
+
+# How often (seconds) the dashboard image is regenerated and the device is asked to refresh.
+refreshSecs: "3600"
+
+# TRMNL API key returned during /api/setup provisioning.
+# Override via --set or a sealed secret.
+trmnlApiKey: "seedbox-byos"
+
+# Persist nothing — the app is stateless (fonts are baked into the image).
+persistence:
+  enabled: false
+
+podAnnotations: {}
+podSecurityContext: {}
+securityContext: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
