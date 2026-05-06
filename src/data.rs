@@ -6,7 +6,9 @@ pub struct HostData {
     pub cpu: u8,
     pub cpu_temp: u8,
     pub ram_pct: u8,
+    #[allow(dead_code)] // available for future widgets
     pub ram_used_gb: f32,
+    #[allow(dead_code)]
     pub ram_total_gb: u8,
     pub disk_pct: u8,
     pub uptime_days: u32,
@@ -56,13 +58,15 @@ pub struct BudgetData {
     pub month_label: String,
     pub spent: u32,
     pub cap: u32,
+    #[allow(dead_code)]
     pub runway_days: u8,
     pub cats: Vec<BudgetCat>,
 }
 
 #[derive(Clone)]
 pub struct Alert {
-    pub level: String, // ERR / WRN / INF
+    pub level: String,
+    #[allow(dead_code)]
     pub time: String,
     pub message: String,
 }
@@ -71,7 +75,8 @@ pub struct Alert {
 pub struct DashData {
     pub device: String,
     pub date_dow: String,
-    pub date_display: String, // "06 MAY 2026"
+    pub date_display: String,
+    #[allow(dead_code)]
     pub date_iso: String,
     pub battery_pct: u8,
     pub signal_bars: u8, // 0-4

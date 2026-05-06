@@ -7,7 +7,7 @@ use crate::data::DashData;
 const BLACK:  Rgb<u8> = Rgb([0,   0,   0]);
 const WHITE:  Rgb<u8> = Rgb([255, 255, 255]);
 const RED:    Rgb<u8> = Rgb([193,  18,  31]);
-const YELLOW: Rgb<u8> = Rgb([212, 162,   0]);
+const YELLOW: Rgb<u8> = Rgb([212, 162,   0]); // WRN alerts
 
 // Canvas
 const W: u32 = 800;
@@ -143,12 +143,14 @@ fn draw_str_right(img: &mut RgbImage, font: &FontArc, text: &str, right_x: i32, 
     draw_str(img, font, text, right_x - w, y, size, color);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_str_centered(img: &mut RgbImage, font: &FontArc, text: &str, x: i32, y: i32, w: i32, size: f32, color: Rgb<u8>) {
     let tw = str_width(font, text, size) as i32;
     draw_str(img, font, text, x + (w - tw) / 2, y, size, color);
 }
 
 // Draws text with a 1-pixel black outline (for legibility on striped bg)
+#[allow(clippy::too_many_arguments)]
 fn draw_str_outlined(img: &mut RgbImage, font: &FontArc, text: &str, x: i32, y: i32, size: f32, fg: Rgb<u8>, bg: Rgb<u8>) {
     for dx in -1i32..=1 {
         for dy in -1i32..=1 {
@@ -306,7 +308,7 @@ fn draw_agenda(img: &mut RgbImage, data: &DashData, fonts: &Fonts) {
     let h = R1H;
     let pad = 10;
 
-    let mut cy = stamp_header(img, fonts, x + pad, y + 6, w - pad, "AGENDA", "02");
+    let cy = stamp_header(img, fonts, x + pad, y + 6, w - pad, "AGENDA", "02");
 
     for (i, item) in data.agenda.iter().enumerate() {
         let row_y = cy + i as i32 * 42;
@@ -477,9 +479,9 @@ fn draw_ops(img: &mut RgbImage, data: &DashData, fonts: &Fonts) {
         if ay + 12 > y + h - 2 { break; }
 
         let (bg, fg) = match alert.level.as_str() {
-            "ERR" => (RED, WHITE),
-            "WRN" => (BLACK, WHITE),
-            _     => (WHITE, BLACK),
+            "ERR" => (RED,    WHITE),
+            "WRN" => (YELLOW, BLACK),
+            _     => (WHITE,  BLACK),
         };
         let lbl = format!(" {} ", &alert.level);
         let lw = str_width(&fonts.bold, &lbl, 7.5) as i32;
