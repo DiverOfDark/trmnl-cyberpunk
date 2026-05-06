@@ -1,7 +1,7 @@
 services:
-  trmnl-seedbox:
+  trmnl-cyberpunk:
     build: .
-    container_name: trmnl-seedbox
+    container_name: trmnl-cyberpunk
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -13,6 +13,6 @@ services:
       # How often (seconds) to regenerate the dashboard (default: 3600 = 1h)
       REFRESH_SECS: "3600"
 
-      FONT_DIR: "/app/fonts"
       LISTEN: "0.0.0.0:8080"
-      RUST_LOG: "trmnl_seedbox=info"
+      RUST_LOG: "trmnl_cyberpunk=info"
+      CHROME_PATH: "/usr/bin/chromium"
