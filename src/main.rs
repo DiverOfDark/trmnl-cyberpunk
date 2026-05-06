@@ -1,4 +1,5 @@
 mod data;
+mod fetch;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,6 +19,7 @@ use tracing::{info, warn};
 use trmnl::{DeviceInfo, DisplayResponse};
 
 use data::DashData;
+use fetch::Sources;
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -34,6 +36,7 @@ struct AppState {
     png_cache: Arc<RwLock<Vec<u8>>>,
     device_state: Arc<RwLock<DeviceState>>,
     data: Arc<RwLock<DashData>>,
+    sources: Arc<Sources>,
     port: u16,
     render_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -128,7 +131,8 @@ async fn regenerate(state: &AppState) {
         return;
     };
 
-    *state.data.write().await = DashData::mock();
+    let mock = DashData::mock();
+    *state.data.write().await = state.sources.fetch(&mock).await;
 
     match screenshot_dashboard(state.port).await {
         Ok(png) => {
@@ -241,11 +245,12 @@ async fn main() {
     let port = listener.local_addr().unwrap().port();
 
     let state = AppState {
-        png_cache:   Arc::new(RwLock::new(Vec::new())),
+        png_cache:    Arc::new(RwLock::new(Vec::new())),
         device_state: Arc::new(RwLock::new(DeviceState::default())),
-        data:        Arc::new(RwLock::new(DashData::mock())),
+        data:         Arc::new(RwLock::new(DashData::mock())),
+        sources:      Arc::new(Sources::from_env()),
         port,
-        render_lock: Arc::new(tokio::sync::Mutex::new(())),
+        render_lock:  Arc::new(tokio::sync::Mutex::new(())),
     };
 
     // Background render loop — first render fires after server is ready.

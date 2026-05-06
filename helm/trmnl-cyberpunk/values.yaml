@@ -43,6 +43,28 @@ refreshSecs: "3600"
 # TRMNL API key returned during /api/setup provisioning.
 trmnlApiKey: "cyberpunk-byos"
 
+# ── Live data sources (all optional — falls back to mock data when blank) ──
+
+# Prometheus scrape endpoint for node_exporter host metrics.
+prometheusUrl: ""
+
+# Alertmanager API for active alerts.
+alertmanagerUrl: ""
+
+# Nextcloud CalDAV for today's agenda.
+nextcloudUrl: ""
+nextcloudUser: ""
+nextcloudPass: ""   # stored in Secret
+
+# ActualBudget HTTP API sidecar for budget data.
+actualbudgetUrl: ""
+actualbudgetKey: ""  # stored in Secret
+
+# Open-Meteo weather location (no API key required).
+weatherLat: "52.50"
+weatherLon: "13.33"
+weatherTz: "Europe/Berlin"
+
 podAnnotations: {}
 podSecurityContext: {}
 securityContext: {}

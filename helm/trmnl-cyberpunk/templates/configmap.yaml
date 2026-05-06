@@ -10,3 +10,11 @@ data:
   CHROME_PATH: "/usr/bin/chromium"
   LISTEN: "0.0.0.0:8080"
   RUST_LOG: "trmnl_cyberpunk=info"
+  PROMETHEUS_URL: {{ .Values.prometheusUrl | default "" | quote }}
+  ALERTMANAGER_URL: {{ .Values.alertmanagerUrl | default "" | quote }}
+  NEXTCLOUD_URL: {{ .Values.nextcloudUrl | default "" | quote }}
+  NEXTCLOUD_USER: {{ .Values.nextcloudUser | default "" | quote }}
+  ACTUALBUDGET_URL: {{ .Values.actualbudgetUrl | default "" | quote }}
+  WEATHER_LAT: {{ .Values.weatherLat | default "52.50" | quote }}
+  WEATHER_LON: {{ .Values.weatherLon | default "13.33" | quote }}
+  WEATHER_TZ: {{ .Values.weatherTz | default "Europe/Berlin" | quote }}

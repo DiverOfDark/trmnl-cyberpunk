@@ -16,3 +16,21 @@ services:
       LISTEN: "0.0.0.0:8080"
       RUST_LOG: "trmnl_cyberpunk=info"
       CHROME_PATH: "/usr/bin/chromium"
+
+      # Prometheus / Alertmanager (leave blank to use mock data)
+      PROMETHEUS_URL: ""
+      ALERTMANAGER_URL: ""
+
+      # Nextcloud CalDAV — leave blank to use mock agenda
+      NEXTCLOUD_URL: ""
+      NEXTCLOUD_USER: ""
+      NEXTCLOUD_PASS: ""
+
+      # ActualBudget HTTP API — leave blank to use mock budget
+      ACTUALBUDGET_URL: ""
+      ACTUALBUDGET_KEY: ""
+
+      # Weather location (Open-Meteo, no key needed)
+      WEATHER_LAT: "52.50"
+      WEATHER_LON: "13.33"
+      WEATHER_TZ: "Europe/Berlin"

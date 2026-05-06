@@ -1,0 +1,566 @@
+use std::collections::HashMap;
+use std::time::Duration;
+
+use anyhow::{anyhow, Result};
+use chrono::{Datelike, Local, Weekday};
+use reqwest::Client;
+use serde_json::Value;
+use tracing::warn;
+
+use crate::data::*;
+
+// ── Sources config ─────────────────────────────────────────────────────────
+
+pub struct Sources {
+    client: Client,
+    pub prometheus: String,
+    pub alertmanager: String,
+    pub actualbudget_url: String,
+    pub actualbudget_key: String,
+    pub nextcloud_url: String,
+    pub nextcloud_user: String,
+    pub nextcloud_pass: String,
+    pub weather_lat: f64,
+    pub weather_lon: f64,
+    pub weather_tz: String,
+}
+
+impl Sources {
+    pub fn from_env() -> Self {
+        Self {
+            client: Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap(),
+            prometheus: std::env::var("PROMETHEUS_URL").unwrap_or_else(|_| {
+                "http://prometheus-operated.prometheus.svc.cluster.local:9090".into()
+            }),
+            alertmanager: std::env::var("ALERTMANAGER_URL").unwrap_or_else(|_| {
+                "http://alertmanager-operated.prometheus.svc.cluster.local:9093".into()
+            }),
+            actualbudget_url: std::env::var("ACTUALBUDGET_URL").unwrap_or_else(|_| {
+                "http://actualbudget-api.actualbudget.svc.cluster.local".into()
+            }),
+            actualbudget_key: std::env::var("ACTUALBUDGET_KEY").unwrap_or_default(),
+            nextcloud_url: std::env::var("NEXTCLOUD_URL").unwrap_or_else(|_| {
+                "http://nextcloud.nextcloud.svc.cluster.local".into()
+            }),
+            nextcloud_user: std::env::var("NEXTCLOUD_USER").unwrap_or_default(),
+            nextcloud_pass: std::env::var("NEXTCLOUD_PASS").unwrap_or_default(),
+            weather_lat: std::env::var("WEATHER_LAT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(52.50),
+            weather_lon: std::env::var("WEATHER_LON")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(13.33),
+            weather_tz: std::env::var("WEATHER_TZ")
+                .unwrap_or_else(|_| "Europe/Berlin".into()),
+        }
+    }
+
+    // Fetch all data concurrently; fall back to mock values per section on error.
+    pub async fn fetch(&self, mock: &DashData) -> DashData {
+        let (hosts_r, weather_r, alerts_r, budget_r, agenda_r) = tokio::join!(
+            self.hosts(),
+            self.weather(),
+            self.alerts(),
+            self.budget(),
+            self.agenda(),
+        );
+
+        let hosts = hosts_r.unwrap_or_else(|e| {
+            warn!("hosts fetch failed: {e}");
+            mock.hosts.clone()
+        });
+        let weather = weather_r.unwrap_or_else(|e| {
+            warn!("weather fetch failed: {e}");
+            mock.weather.clone()
+        });
+        let alerts = alerts_r.unwrap_or_else(|e| {
+            warn!("alerts fetch failed: {e}");
+            mock.alerts.clone()
+        });
+        let budget = budget_r.unwrap_or_else(|e| {
+            warn!("budget fetch failed: {e}");
+            mock.budget.clone()
+        });
+        let agenda = agenda_r.unwrap_or_else(|e| {
+            warn!("agenda fetch failed: {e}");
+            mock.agenda.clone()
+        });
+
+        let now = Local::now();
+        let months = [
+            "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+            "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+        ];
+        let dow = match now.weekday() {
+            Weekday::Sun => "SUN", Weekday::Mon => "MON", Weekday::Tue => "TUE",
+            Weekday::Wed => "WED", Weekday::Thu => "THU", Weekday::Fri => "FRI",
+            Weekday::Sat => "SAT",
+        };
+        let month = months[(now.month() - 1) as usize];
+        let refresh_secs: i64 = std::env::var("REFRESH_SECS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(3600);
+        let next = now + chrono::Duration::seconds(refresh_secs);
+
+        DashData {
+            time: now.format("%H:%M").to_string(),
+            date: format!("{:02} {} {}", now.day(), month, now.year()),
+            date_dow: dow.into(),
+            motto: mock.motto.clone(),
+            last_sync: now.format("%H:%M").to_string(),
+            next_sync: next.format("%H:%M").to_string(),
+            hosts,
+            weather,
+            agenda,
+            tasks: mock.tasks.clone(),
+            budget,
+            alerts,
+        }
+    }
+}
+
+// ── Prometheus helpers ─────────────────────────────────────────────────────
+
+async fn prom_query(client: &Client, base: &str, query: &str) -> Result<Vec<(String, f64)>> {
+    let url = format!("{}/api/v1/query", base);
+    let resp: Value = client
+        .get(&url)
+        .query(&[("query", query)])
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let results = resp["data"]["result"]
+        .as_array()
+        .ok_or_else(|| anyhow!("no result array in prometheus response"))?;
+
+    let mut out = Vec::new();
+    for r in results {
+        let instance = r["metric"]["instance"].as_str()
+            .or_else(|| r["metric"]["node"].as_str())
+            .unwrap_or("unknown");
+        let host = instance.split(':').next().unwrap_or(instance).to_string();
+        let val: f64 = r["value"][1]
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+        out.push((host, val));
+    }
+    Ok(out)
+}
+
+fn to_map(pairs: Vec<(String, f64)>) -> HashMap<String, f64> {
+    pairs.into_iter().collect()
+}
+
+// ── Host metrics ──────────────────────────────────────────────────────────
+
+impl Sources {
+    async fn hosts(&self) -> Result<Vec<HostData>> {
+        let (cpu_r, temp_r, ram_r, disk_r, uptime_r, l1_r, l5_r, l15_r) = tokio::join!(
+            prom_query(&self.client, &self.prometheus,
+                r#"100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)"#),
+            prom_query(&self.client, &self.prometheus,
+                r#"avg by(instance) (node_hwmon_temp_celsius{chip=~".*coretemp.*|.*k10temp.*|.*zenpower.*"})"#),
+            prom_query(&self.client, &self.prometheus,
+                r#"100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)"#),
+            prom_query(&self.client, &self.prometheus,
+                r#"100 * (1 - node_filesystem_avail_bytes{mountpoint="/",fstype!~"rootfs|tmpfs"} / node_filesystem_size_bytes{mountpoint="/",fstype!~"rootfs|tmpfs"})"#),
+            prom_query(&self.client, &self.prometheus,
+                r#"(time() - node_boot_time_seconds) / 86400"#),
+            prom_query(&self.client, &self.prometheus, "node_load1"),
+            prom_query(&self.client, &self.prometheus, "node_load5"),
+            prom_query(&self.client, &self.prometheus, "node_load15"),
+        );
+
+        let cpu_map    = to_map(cpu_r.unwrap_or_default());
+        let temp_map   = to_map(temp_r.unwrap_or_default());
+        let ram_map    = to_map(ram_r.unwrap_or_default());
+        let disk_map   = to_map(disk_r.unwrap_or_default());
+        let uptime_map = to_map(uptime_r.unwrap_or_default());
+        let l1_map     = to_map(l1_r.unwrap_or_default());
+        let l5_map     = to_map(l5_r.unwrap_or_default());
+        let l15_map    = to_map(l15_r.unwrap_or_default());
+
+        // Union of all known instances (prefer uptime as the canonical set)
+        let mut hosts_set: std::collections::BTreeSet<String> =
+            uptime_map.keys().cloned().collect();
+        for map in [&cpu_map, &ram_map, &disk_map] {
+            hosts_set.extend(map.keys().cloned());
+        }
+
+        if hosts_set.is_empty() {
+            return Err(anyhow!("no hosts found in prometheus"));
+        }
+
+        let hosts = hosts_set
+            .into_iter()
+            .map(|name| HostData {
+                cpu:         cpu_map.get(&name).copied().unwrap_or(0.0).round() as u8,
+                cpu_temp:    temp_map.get(&name).copied().unwrap_or(0.0).round() as u8,
+                ram_pct:     ram_map.get(&name).copied().unwrap_or(0.0).round() as u8,
+                disk_pct:    disk_map.get(&name).copied().unwrap_or(0.0).round() as u8,
+                uptime_days: uptime_map.get(&name).copied().unwrap_or(0.0) as u32,
+                load: [
+                    l1_map.get(&name).copied().unwrap_or(0.0) as f32,
+                    l5_map.get(&name).copied().unwrap_or(0.0) as f32,
+                    l15_map.get(&name).copied().unwrap_or(0.0) as f32,
+                ],
+                name,
+            })
+            .collect();
+
+        Ok(hosts)
+    }
+}
+
+// ── Weather (Open-Meteo) ───────────────────────────────────────────────────
+
+fn wmo_to_cond(code: u64) -> &'static str {
+    match code {
+        0..=1           => "SUN",
+        2..=3           => "CLOUD",
+        45..=48         => "FOG",
+        51..=67         => "RAIN",
+        71..=77         => "SNOW",
+        80..=82         => "RAIN",
+        85..=86         => "SNOW",
+        95..=99         => "STORM",
+        _               => "CLOUD",
+    }
+}
+
+fn dow_from_date(date_str: &str) -> &'static str {
+    use chrono::NaiveDate;
+    let Ok(d) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") else { return "---" };
+    match d.weekday() {
+        Weekday::Sun => "SUN", Weekday::Mon => "MON", Weekday::Tue => "TUE",
+        Weekday::Wed => "WED", Weekday::Thu => "THU", Weekday::Fri => "FRI",
+        Weekday::Sat => "SAT",
+    }
+}
+
+impl Sources {
+    async fn weather(&self) -> Result<WeatherData> {
+        let url = format!(
+            "https://api.open-meteo.com/v1/forecast\
+             ?latitude={}&longitude={}&timezone={}\
+             &current=temperature_2m,weather_code\
+             &daily=weather_code,temperature_2m_max,temperature_2m_min\
+             &forecast_days=5",
+            self.weather_lat, self.weather_lon,
+            urlencoding::encode(&self.weather_tz),
+        );
+
+        let resp: Value = self.client.get(&url).send().await?.json().await?;
+
+        let cur  = &resp["current"];
+        let daily = &resp["daily"];
+
+        let temp_c    = cur["temperature_2m"].as_f64().unwrap_or(0.0).round() as i8;
+        let cur_code  = cur["weather_code"].as_u64().unwrap_or(0);
+        let condition = wmo_to_cond(cur_code).to_string();
+
+        let times: Vec<&str> = daily["time"].as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        let codes:  Vec<u64> = daily["weather_code"].as_array()
+            .map(|a| a.iter().map(|v| v.as_u64().unwrap_or(0)).collect())
+            .unwrap_or_default();
+        let maxs: Vec<f64> = daily["temperature_2m_max"].as_array()
+            .map(|a| a.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect())
+            .unwrap_or_default();
+        let mins: Vec<f64> = daily["temperature_2m_min"].as_array()
+            .map(|a| a.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect())
+            .unwrap_or_default();
+
+        let today_hi = maxs.first().copied().unwrap_or(0.0).round() as i8;
+        let today_lo = mins.first().copied().unwrap_or(0.0).round() as i8;
+
+        // Skip today (index 0) for the forecast strip
+        let forecast = times.iter().enumerate().skip(1).take(4).map(|(i, date)| {
+            WeatherDay {
+                day:  dow_from_date(date).to_string(),
+                hi:   maxs.get(i).copied().unwrap_or(0.0).round() as i8,
+                lo:   mins.get(i).copied().unwrap_or(0.0).round() as i8,
+                cond: wmo_to_cond(*codes.get(i).unwrap_or(&0)).to_string(),
+            }
+        }).collect();
+
+        Ok(WeatherData {
+            temp_c,
+            condition,
+            hi: today_hi,
+            lo: today_lo,
+            forecast,
+        })
+    }
+}
+
+// ── Alertmanager ──────────────────────────────────────────────────────────
+
+impl Sources {
+    async fn alerts(&self) -> Result<Vec<Alert>> {
+        let url = format!("{}/api/v2/alerts?silenced=false&inhibited=false", self.alertmanager);
+        let resp: Value = self.client.get(&url).send().await?.json().await?;
+
+        let arr = resp.as_array()
+            .ok_or_else(|| anyhow!("alertmanager response not array"))?;
+
+        let mut alerts: Vec<Alert> = arr.iter().take(6).map(|a| {
+            let severity = a["labels"]["severity"].as_str().unwrap_or("info");
+            let level = match severity {
+                "critical" | "error" => "ERR",
+                "warning"            => "WRN",
+                _                    => "INF",
+            }.to_string();
+
+            let starts_at = a["startsAt"].as_str().unwrap_or("");
+            let time = chrono::DateTime::parse_from_rfc3339(starts_at)
+                .map(|t| t.with_timezone(&Local).format("%H:%M").to_string())
+                .unwrap_or_else(|_| "--:--".to_string());
+
+            let message = a["annotations"]["summary"]
+                .as_str()
+                .or_else(|| a["annotations"]["message"].as_str())
+                .or_else(|| a["annotations"]["description"].as_str())
+                .or_else(|| a["labels"]["alertname"].as_str())
+                .unwrap_or("unknown alert")
+                .chars().take(50).collect();
+
+            Alert { level, time, message }
+        }).collect();
+
+        // Sort: ERR first, then WRN, then INF
+        alerts.sort_by_key(|a| match a.level.as_str() { "ERR" => 0, "WRN" => 1, _ => 2 });
+        Ok(alerts)
+    }
+}
+
+// ── ActualBudget HTTP API ─────────────────────────────────────────────────
+
+impl Sources {
+    async fn budget(&self) -> Result<BudgetData> {
+        if self.actualbudget_key.is_empty() {
+            return Err(anyhow!("ACTUALBUDGET_KEY not set"));
+        }
+
+        // Discover budget IDs
+        let budgets: Value = self.client
+            .get(format!("{}/budgets", self.actualbudget_url))
+            .header("x-api-key", &self.actualbudget_key)
+            .send().await?.json().await?;
+
+        let budget_id = budgets.as_array()
+            .and_then(|a| a.first())
+            .and_then(|b| b["id"].as_str())
+            .ok_or_else(|| anyhow!("no budget found"))?
+            .to_string();
+
+        let now   = Local::now();
+        let month = format!("{}-{:02}", now.year(), now.month());
+
+        let month_data: Value = self.client
+            .get(format!("{}/budgets/{}/months/{}", self.actualbudget_url, budget_id, month))
+            .header("x-api-key", &self.actualbudget_key)
+            .send().await?.json().await?;
+
+        let cats_raw = month_data["categoryGroups"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        let mut cats: Vec<BudgetCat> = Vec::new();
+        let mut total_spent: u32 = 0;
+        let mut total_cap: u32 = 0;
+
+        // Flatten all category groups → categories
+        for group in &cats_raw {
+            if let Some(cat_list) = group["categories"].as_array() {
+                for cat in cat_list {
+                    let name  = cat["name"].as_str().unwrap_or("?");
+                    let spent = (cat["spent"].as_f64().unwrap_or(0.0).abs() / 100.0).round() as u32;
+                    let cap   = (cat["budgeted"].as_f64().unwrap_or(0.0) / 100.0).round() as u32;
+                    if cap > 0 || spent > 0 {
+                        total_spent += spent;
+                        total_cap   += cap;
+                        cats.push(BudgetCat {
+                            label: name.chars().take(5).collect::<String>().to_uppercase(),
+                            spent,
+                            cap,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Keep top 5 by cap
+        cats.sort_by(|a, b| b.cap.cmp(&a.cap));
+        cats.truncate(5);
+
+        let months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+        let month_label = format!("{} '{}", months[(now.month()-1) as usize], &now.format("%Y").to_string()[2..]);
+
+        Ok(BudgetData { month_label, spent: total_spent, cap: total_cap, cats })
+    }
+}
+
+// ── Nextcloud CalDAV ──────────────────────────────────────────────────────
+
+impl Sources {
+    async fn agenda(&self) -> Result<Vec<AgendaItem>> {
+        if self.nextcloud_user.is_empty() || self.nextcloud_pass.is_empty() {
+            return Err(anyhow!("NEXTCLOUD_USER / NEXTCLOUD_PASS not set"));
+        }
+
+        let now = Local::now();
+        let today_start = format!("{}T000000Z", now.format("%Y%m%d"));
+        let today_end   = format!("{}T235959Z", now.format("%Y%m%d"));
+
+        let caldav_url = format!(
+            "{}/remote.php/dav/calendars/{}/personal/",
+            self.nextcloud_url.trim_end_matches('/'),
+            self.nextcloud_user,
+        );
+
+        let xml_body = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:prop>
+    <c:calendar-data/>
+  </d:prop>
+  <c:filter>
+    <c:comp-filter name="VCALENDAR">
+      <c:comp-filter name="VEVENT">
+        <c:time-range start="{}" end="{}"/>
+      </c:comp-filter>
+    </c:comp-filter>
+  </c:filter>
+</c:calendar-query>"#,
+            today_start, today_end
+        );
+
+        let resp_text = self.client
+            .request(reqwest::Method::from_bytes(b"REPORT").unwrap(), &caldav_url)
+            .basic_auth(&self.nextcloud_user, Some(&self.nextcloud_pass))
+            .header("Depth", "1")
+            .header("Content-Type", "application/xml; charset=utf-8")
+            .body(xml_body)
+            .send()
+            .await?
+            .text()
+            .await?;
+
+        let items = parse_ical_events(&resp_text);
+        Ok(items)
+    }
+}
+
+fn parse_ical_events(xml: &str) -> Vec<AgendaItem> {
+    let mut items = Vec::new();
+
+    for vevent_block in xml.split("BEGIN:VEVENT") {
+        if !vevent_block.contains("END:VEVENT") {
+            continue;
+        }
+        let block = &vevent_block[..vevent_block.find("END:VEVENT").unwrap_or(vevent_block.len())];
+
+        let summary   = ical_field(block, "SUMMARY").unwrap_or_default();
+        let categories = ical_field_prefix(block, "CATEGORIES").unwrap_or_default();
+        let dtstart   = ical_field_prefix(block, "DTSTART").unwrap_or_default();
+
+        // Extract HH:MM from DTSTART value (handles TZID= and UTC Z forms)
+        let time = parse_ical_time(&dtstart);
+        if time.is_empty() || summary.is_empty() {
+            continue;
+        }
+
+        let tag = if !categories.is_empty() {
+            categories.split(',').next().unwrap_or("").trim()
+                .chars().take(4).collect::<String>().to_uppercase()
+        } else {
+            "PERS".to_string()
+        };
+
+        items.push(AgendaItem { time, title: summary, tag });
+    }
+
+    // Sort by time
+    items.sort_by(|a, b| a.time.cmp(&b.time));
+    items.truncate(6);
+    items
+}
+
+fn ical_field<'a>(block: &'a str, key: &str) -> Option<String> {
+    // Exact key match: "KEY:value"
+    let prefix = format!("{}:", key);
+    for line in block.lines() {
+        let line = line.trim_start(); // handle folded lines
+        if line.starts_with(&prefix) {
+            return Some(unfold(line[prefix.len()..].to_string()));
+        }
+    }
+    None
+}
+
+fn ical_field_prefix<'a>(block: &'a str, key: &str) -> Option<String> {
+    // Matches "KEY:value" OR "KEY;param=...:value"
+    let exact   = format!("{}:", key);
+    let prefixed = format!("{};", key);
+    for line in block.lines() {
+        let line = line.trim_start();
+        if line.starts_with(&exact) {
+            return Some(unfold(line[exact.len()..].to_string()));
+        }
+        if line.starts_with(&prefixed) {
+            if let Some(pos) = line.find(':') {
+                return Some(unfold(line[pos + 1..].to_string()));
+            }
+        }
+    }
+    None
+}
+
+fn unfold(s: String) -> String {
+    // iCal line folding: CRLF + SPACE/TAB continues the value
+    s.replace("\r\n ", "").replace("\n ", "").replace("\r\n\t", "").replace("\n\t", "")
+}
+
+fn parse_ical_time(dtstart: &str) -> String {
+    // Handles: 20260506T153000Z  or  20260506T153000  (local)
+    if dtstart.len() < 15 {
+        return String::new();
+    }
+    let t_pos = dtstart.find('T').unwrap_or(0);
+    if t_pos == 0 {
+        return String::new();
+    }
+    let time_part = &dtstart[t_pos + 1..];
+    if time_part.len() < 4 {
+        return String::new();
+    }
+    format!("{}:{}", &time_part[..2], &time_part[2..4])
+}
+
+// ── urlencoding helper ────────────────────────────────────────────────────
+
+mod urlencoding {
+    pub fn encode(s: &str) -> String {
+        let mut out = String::new();
+        for b in s.bytes() {
+            if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.' || b == b'~' {
+                out.push(b as char);
+            } else {
+                out.push('%');
+                out.push(char::from_digit((b >> 4) as u32, 16).unwrap().to_ascii_uppercase());
+                out.push(char::from_digit((b & 0xf) as u32, 16).unwrap().to_ascii_uppercase());
+            }
+        }
+        out
+    }
+}
