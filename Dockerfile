@@ -1,14 +1,15 @@
-# ── Stage 1: Dependency cache (cargo-chef) ────────────────────────────────────
-FROM lukemathwalker/cargo-chef:latest-rust-1-slim-bookworm AS chef
+# ── Stage 1: Build ────────────────────────────────────────────────────────────
+FROM rust:1-slim-bookworm AS builder
 WORKDIR /app
 
-FROM chef AS planner
-COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
+# Cache dependency build by copying only the manifests first, then a stub
+# main.rs. The dep layer is reused as long as Cargo.toml/Cargo.lock are stable.
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo 'fn main() {}' > src/main.rs \
+    && cargo build --release \
+    && rm -rf src target/release/trmnl-cyberpunk target/release/deps/trmnl_cyberpunk-*
 
-FROM chef AS builder
-COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
+# Now the real source.
 COPY src ./src
 COPY templates ./templates
 RUN cargo build --release --bin trmnl-cyberpunk
