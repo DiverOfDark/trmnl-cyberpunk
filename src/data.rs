@@ -71,6 +71,8 @@ pub struct DashData {
     pub date: String,
     pub date_dow: String,
     pub motto: String,
+    pub last_sync: String,
+    pub next_sync: String,
     pub hosts: Vec<HostData>,
     pub weather: WeatherData,
     pub agenda: Vec<AgendaItem>,
@@ -94,11 +96,17 @@ impl DashData {
         };
         let month = months[(now.month() - 1) as usize];
 
+        let refresh_secs: i64 = std::env::var("REFRESH_SECS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(3600);
+        let next = now + chrono::Duration::seconds(refresh_secs);
+
         Self {
             time: now.format("%H:%M").to_string(),
             date: format!("{:02} {} {}", now.day(), month, now.year()),
             date_dow: dow.into(),
             motto: "STAY PARANOID. STAY ONLINE.".into(),
+            last_sync: now.format("%H:%M").to_string(),
+            next_sync: next.format("%H:%M").to_string(),
             hosts: vec![
                 HostData {
                     name: "asgard".into(),

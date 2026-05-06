@@ -2,362 +2,346 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700;800&family=Noto+Sans+JP:wght@500;700;900&display=swap" rel="stylesheet">
 <style>
-/* === Palette ===
-   Black   #000000   White   #ffffff
-   Blue    #0055cc   Red     #cc0000
-   Yellow  #ccaa00   Green   #007700          */
-
-*{margin:0;padding:0;box-sizing:border-box}
-html,body{
-  width:800px;height:480px;overflow:hidden;
-  background:#000;color:#fff;
-  font-family:'Courier New',Courier,monospace;
-  font-size:11px;line-height:1.25;
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  width: 800px; height: 480px;
+  overflow: hidden;
+  background: #fff; color: #000;
+  font-family: 'Space Grotesk', 'Inter', system-ui, sans-serif;
+  font-size: 11px; line-height: 1.2;
+  position: relative;
 }
+
+/* ── Corner registration marks ── */
+.reg { position: absolute; width: 8px; height: 8px; border-top: 1px solid #000; border-left: 1px solid #000; }
+.reg.tr { transform: scaleX(-1); }
+.reg.bl { transform: scaleY(-1); }
+.reg.br { transform: scale(-1); }
 
 /* ── Header ── */
-.hdr{
-  width:800px;height:36px;
-  background:#0055cc;color:#fff;
-  display:flex;align-items:center;
-  padding:0 8px;gap:10px;
-  border-bottom:2px solid #ccaa00;
+.hdr {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: stretch;
+  border-bottom: 3px solid #000;
+  height: 44px;
 }
-.hdr-logo{font-weight:bold;font-size:13px;letter-spacing:3px;white-space:nowrap}
-.hdr-sep{flex:1}
-.hdr-dt{font-size:11px;white-space:nowrap}
-.hdr-batt{display:flex;align-items:center;gap:4px;white-space:nowrap;font-size:10px}
-.batt-shell{
-  width:28px;height:11px;border:1px solid #fff;position:relative;display:inline-block;
+.hdr-left {
+  background: #000; color: #fff;
+  padding: 0 12px; padding-right: 22px;
+  display: flex; align-items: center; gap: 8px;
+  clip-path: polygon(0 0, 100% 0, calc(100% - 14px) 100%, 0 100%);
 }
-.batt-shell::after{
-  content:'';position:absolute;right:-4px;top:2px;width:3px;height:5px;background:#fff;
+.hdr-left .unit  { font-size: 10px; letter-spacing: 2px; opacity: .7; }
+.hdr-left .name  { font-size: 22px; font-weight: 800; letter-spacing: -.5px; }
+.hdr-left .jp    { font-family: 'Noto Sans JP', system-ui; font-size: 12px; color: #c1121f; }
+.hdr-center {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 700; letter-spacing: 4px;
+  color: #fff;
+  text-shadow: 0 1px 0 #000, 1px 0 0 #000, -1px 0 0 #000, 0 -1px 0 #000;
+  background: repeating-linear-gradient(
+    135deg,
+    #c1121f 0 6px, #000 6px 8px,
+    #c1121f 8px 14px, #fff 14px 20px
+  );
 }
-.batt-fill{height:100%;background:#007700;transition:none}
-.batt-fill.warn{background:#ccaa00}
-.batt-fill.crit{background:#cc0000}
-.sig{display:flex;gap:2px;align-items:flex-end}
-.sig span{width:4px;background:#fff;display:block}
-
-/* ── 3-column grid ── */
-.grid{
-  display:grid;
-  grid-template-columns:240px 268px 292px;
-  height:444px;
+.hdr-right {
+  display: flex; flex-direction: column; justify-content: center;
+  padding: 0 12px; text-align: right;
+  font-feature-settings: 'tnum';
+  font-size: 10px; letter-spacing: 1px;
 }
-.col{display:flex;flex-direction:column;border-right:1px solid #222;overflow:hidden}
-.col:last-child{border-right:none}
-.pane{padding:5px 6px;border-bottom:1px solid #222;overflow:hidden}
-.pane:last-child{border-bottom:none;flex:1}
+.hdr-right .meta { display: flex; gap: 8px; justify-content: flex-end; }
 
-/* ── Section labels ── */
-.sh{
-  color:#0055cc;font-size:9px;font-weight:bold;letter-spacing:2px;
-  border-bottom:1px solid #0055cc;padding-bottom:2px;margin-bottom:5px;
+/* ── Body grid ── */
+.body {
+  display: grid;
+  grid-template-columns: 260px 1fr 220px;
+  grid-template-rows: 1fr 1fr;
+  height: calc(480px - 44px - 22px);
 }
 
-/* ── Progress bars ── */
-.bar-row{display:flex;align-items:center;gap:4px;margin-bottom:3px}
-.bar-lbl{font-size:9px;color:#888;width:26px}
-.bar-track{flex:1;height:5px;background:#1a1a1a;border:1px solid #333}
-.bar-fill{height:100%;background:#fff}
-.bar-fill.ok{background:#007700}
-.bar-fill.warn{background:#ccaa00}
-.bar-fill.crit{background:#cc0000}
-.bar-num{font-size:9px;width:24px;text-align:right;color:#aaa}
+/* ── Stamp section headers ── */
+.sh {
+  display: flex; align-items: center; gap: 6px;
+  border-bottom: 2px solid #000; padding-bottom: 2px; margin-bottom: 4px;
+}
+.sh .en {
+  background: #000; color: #fff;
+  padding: 1px 5px; font-size: 9px; letter-spacing: 1px; font-weight: 700;
+}
+.sh .jp { font-family: 'Noto Sans JP', system-ui; font-size: 11px; font-weight: 700; color: #c1121f; }
+.sh .seq { margin-left: auto; font-size: 9px; opacity: .6; }
 
-/* ── Hosts ── */
-.host{margin-bottom:7px}
-.host-hdr{display:flex;justify-content:space-between;margin-bottom:2px}
-.host-name{color:#0055cc;font-weight:bold;font-size:11px}
-.host-meta{font-size:9px;color:#555}
-
-/* ── Budget ── */
-.bgt-hdr{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px}
-.bgt-mo{color:#0055cc;font-size:10px;font-weight:bold}
-.bgt-tot{font-size:11px;font-weight:bold}
-.bgt-cat{display:flex;align-items:center;gap:4px;margin-bottom:2px}
-.bgt-cat-lbl{font-size:9px;color:#888;width:30px}
-.bgt-cat-track{flex:1;height:5px;background:#1a1a1a;border:1px solid #333}
-.bgt-cat-fill{height:100%;background:#007700}
-.bgt-cat-fill.over{background:#cc0000}
-.bgt-cat-amt{font-size:9px;color:#555;width:52px;text-align:right}
+/* ── Panels ── */
+.p-wx     { grid-row: span 2; border-right: 2px solid #000; padding: 10px 12px; display: flex; flex-direction: column; }
+.p-agenda { border-bottom: 2px solid #000; padding: 8px 12px; overflow: hidden; }
+.p-sys    { padding: 8px 12px; }
+.p-budget { border-left: 2px solid #000; border-bottom: 2px solid #000; padding: 8px 10px; }
+.p-ops    { border-left: 2px solid #000; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; overflow: hidden; }
 
 /* ── Weather ── */
-.wx-now{display:flex;align-items:center;gap:10px;margin-bottom:6px}
-.wx-temp{font-size:32px;font-weight:bold;line-height:1;color:#ccaa00}
-.wx-detail{font-size:10px;color:#aaa}
-.wx-cond{font-size:11px;color:#fff;margin-bottom:2px}
-.forecast{display:grid;grid-template-columns:repeat(4,1fr);gap:3px}
-.fc-day{text-align:center;border:1px solid #222;padding:2px 0}
-.fc-name{font-size:9px;color:#0055cc;font-weight:bold}
-.fc-icon{font-size:13px}
-.fc-tmp{font-size:9px;color:#aaa}
-
-/* ── Tasks ── */
-.task{display:flex;align-items:baseline;gap:4px;margin-bottom:3px}
-.task-chk{font-size:11px;width:12px;color:#007700}
-.task-chk.open{color:#555}
-.task-txt{flex:1;font-size:10px;line-height:1.3}
-.task-txt.done{color:#444;text-decoration:line-through}
-.task-pri{font-size:8px;padding:0 3px;border:1px solid;line-height:14px}
-.task-pri.hi{color:#cc0000;border-color:#cc0000}
-.task-pri.med{color:#ccaa00;border-color:#ccaa00}
-.task-pri.low{color:#444;border-color:#444}
+.wx-row  { display: flex; align-items: flex-start; gap: 6px; }
+.wx-temp { font-size: 96px; font-weight: 800; line-height: .85; letter-spacing: -4px; }
+.wx-temp .deg { color: #c1121f; }
+.wx-side { margin-top: 6px; }
+.wx-cond { font-size: 11px; font-weight: 700; letter-spacing: 1px; }
+.wx-hl   { font-size: 9px; }
+.forecast {
+  margin-top: auto;
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  border-top: 1px solid #000;
+}
+.fc { padding: 4px 4px 6px; text-align: center; border-right: 1px dashed #000; }
+.fc:last-child { border-right: none; }
+.fc-d  { font-size: 9px; letter-spacing: 1px; font-weight: 700; }
+.fc-hi { font-size: 18px; font-weight: 800; line-height: 1; }
+.fc-lo { font-size: 8px; opacity: .6; }
 
 /* ── Agenda ── */
-.ev{display:flex;gap:5px;margin-bottom:4px;align-items:flex-start}
-.ev-time{color:#ccaa00;font-size:10px;min-width:38px;white-space:nowrap}
-.ev-body{flex:1}
-.ev-title{font-size:10px;line-height:1.3}
-.ev-tag{font-size:8px;color:#0055cc;border:1px solid #0055cc;padding:0 3px;display:inline-block;margin-top:1px}
+.ev {
+  display: grid; grid-template-columns: 56px 1fr 44px;
+  align-items: center; padding: 2px 0;
+  border-bottom: 1px dashed #000;
+}
+.ev:last-child { border-bottom: none; }
+.ev-t { font-size: 14px; font-weight: 800; font-feature-settings: 'tnum'; }
+.ev-t.first { color: #c1121f; }
+.ev-title { font-size: 11px; font-weight: 600; }
+.ev-tag { font-size: 8px; font-weight: 700; letter-spacing: 1px; text-align: center; background: #000; color: #fff; padding: 1px 0; }
+
+/* ── SYS metrics ── */
+.sys-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.box { border: 1px solid #000; padding: 4px 6px; }
+.box-lbl { font-size: 8px; letter-spacing: 1px; font-weight: 700; }
+.box-val { font-size: 22px; font-weight: 800; line-height: 1; }
+.box-val .u { font-size: 11px; color: #c1121f; }
+.box-bar { height: 4px; background: #eee; border: 1px solid #000; margin-top: 2px; }
+.box-bar-fill { height: 100%; background: #000; }
+.box-bar-fill.hot { background: #c1121f; }
+.sys-meta { margin-top: 6px; font-size: 9px; display: flex; justify-content: space-between; }
+
+/* ── Budget ── */
+.bgt-total { font-size: 26px; font-weight: 800; line-height: 1; }
+.bgt-sub   { font-size: 9px; opacity: .7; }
+.bgt-bar   { height: 8px; border: 1px solid #000; margin: 4px 0 6px; position: relative; }
+.bgt-bar-fill { height: 100%; background: #c1121f; }
+.bgt-cats {
+  font-size: 8px;
+  display: grid; grid-template-columns: auto 1fr auto;
+  row-gap: 2px; column-gap: 4px;
+}
+.bgt-k { font-weight: 700; }
+.bgt-track { height: 4px; border: 1px solid #000; align-self: center; margin: 0 4px; }
+.bgt-fill  { height: 100%; background: #000; }
+.bgt-fill.hot { background: #c1121f; }
+.bgt-v { font-feature-settings: 'tnum'; }
+
+/* ── OPS tasks ── */
+.task { display: grid; grid-template-columns: 12px 22px 1fr; column-gap: 3px; padding: 1px 0; font-size: 9px; }
+.task-p { font-weight: 700; }
+.task-p.hi { color: #c1121f; }
+.task-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-t.done { text-decoration: line-through; }
 
 /* ── Alerts ── */
-.alert{display:flex;gap:4px;margin-bottom:4px;align-items:flex-start}
-.alert-lvl{font-size:8px;font-weight:bold;padding:1px 3px;white-space:nowrap;line-height:13px}
-.alert-lvl.err{background:#cc0000;color:#fff}
-.alert-lvl.wrn{background:#ccaa00;color:#000}
-.alert-lvl.inf{background:#0055cc;color:#fff}
-.alert-msg{font-size:9px;color:#bbb;line-height:1.4}
+.alts { border-top: 1px dashed #000; padding-top: 3px; font-size: 8px; }
+.alt  { display: grid; grid-template-columns: 30px 1fr; column-gap: 4px; margin-bottom: 2px; }
+.alt-l { text-align: center; font-weight: 700; padding: 0 2px; color: #fff; }
+.alt-l.err { background: #c1121f; }
+.alt-l.wrn { background: #e5b800; color: #000; }
+.alt-l.inf { background: #000; }
+.alt-m { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── Footer ── */
-.footer{
-  position:absolute;bottom:0;left:0;right:0;height:16px;
-  display:flex;align-items:center;padding:0 8px;gap:8px;
-  background:#0a0a0a;border-top:1px solid #1a1a1a;
-  font-size:9px;color:#333;
+.footer {
+  position: absolute; bottom: 0; left: 0; right: 0; height: 22px;
+  background: #000; color: #fff;
+  display: flex; align-items: center; gap: 12px; padding: 0 10px;
+  font-size: 9px; letter-spacing: 2px; font-weight: 700;
 }
-.footer-motto{flex:1;letter-spacing:1px}
+.footer .online { color: #c1121f; }
+.footer .jp { margin-left: auto; font-family: 'Noto Sans JP', system-ui; }
 </style>
 </head>
 <body>
 
+<!-- Registration marks -->
+<div class="reg"    style="top:4px;left:4px"></div>
+<div class="reg tr" style="top:4px;right:4px"></div>
+<div class="reg bl" style="bottom:26px;left:4px"></div>
+<div class="reg br" style="bottom:26px;right:4px"></div>
+
+<!-- Header -->
 <div class="hdr">
-  <span class="hdr-logo">▓ TRMNL//CYBERPUNK</span>
-  <span class="hdr-sep"></span>
-  <span class="hdr-dt" id="hdr-dow">---</span>
-  <span class="hdr-dt" id="hdr-date">-- --- ----</span>
-  <span class="hdr-dt" id="hdr-time">--:--</span>
-  <span class="hdr-batt">
-    BATT
-    <span class="batt-shell"><span class="batt-fill" id="batt-fill" style="width:0%"></span></span>
-    <span id="batt-pct">--%</span>
-  </span>
-  <span class="sig" id="sig">
-    <span style="height:4px"></span>
-    <span style="height:7px"></span>
-    <span style="height:10px"></span>
-    <span style="height:13px"></span>
-  </span>
+  <div class="hdr-left">
+    <span class="unit">UNIT</span>
+    <span class="name">TRMNL-01</span>
+    <span class="jp">端末</span>
+  </div>
+  <div class="hdr-center" id="hdr-motto">STAY PARANOID. STAY ONLINE.</div>
+  <div class="hdr-right">
+    <div id="hdr-date">WED · 06/MAY/2026</div>
+    <div class="meta">
+      <span>BAT <span id="hdr-bat">--</span>%</span>
+      <span>SIG <span id="hdr-sig">○○○○</span></span>
+    </div>
+  </div>
 </div>
 
-<div class="grid">
+<!-- Body -->
+<div class="body">
 
-  <!-- ── LEFT: Hosts + Budget ── -->
-  <div class="col">
-    <div class="pane" style="flex:0 0 auto">
-      <div class="sh">// HOSTS</div>
-      <div id="hosts"></div>
-    </div>
-    <div class="pane" style="flex:1">
-      <div class="sh">// BUDGET</div>
-      <div class="bgt-hdr">
-        <span class="bgt-mo" id="bgt-mo">---</span>
-        <span class="bgt-tot"><span id="bgt-spent">--</span>/<span id="bgt-cap">--</span> EUR</span>
+  <!-- COL 1 rows 1+2: Weather -->
+  <div class="p-wx">
+    <div class="sh"><span class="en">WX</span><span class="jp">天気</span><span class="seq">// 01</span></div>
+    <div class="wx-row">
+      <div class="wx-temp"><span id="wx-temp">14</span><span class="deg">°</span></div>
+      <div class="wx-side">
+        <div class="wx-cond" id="wx-cond">RAIN</div>
+        <div class="wx-hl">↑<span id="wx-hi">17</span>° ↓<span id="wx-lo">9</span>°</div>
       </div>
-      <div class="bar-row" style="margin-bottom:6px">
-        <div class="bar-track" style="flex:1"><div class="bar-fill" id="bgt-bar" style="width:0%"></div></div>
-        <span class="bar-num" id="bgt-pct">--%</span>
-      </div>
-      <div id="bgt-cats"></div>
     </div>
+    <div class="forecast" id="forecast"></div>
   </div>
 
-  <!-- ── MIDDLE: Weather + Tasks ── -->
-  <div class="col">
-    <div class="pane" style="flex:0 0 auto">
-      <div class="sh">// WEATHER</div>
-      <div class="wx-now">
-        <span class="wx-temp" id="wx-temp">--°</span>
-        <div>
-          <div class="wx-cond" id="wx-cond">---</div>
-          <div class="wx-detail">↑<span id="wx-hi">--</span>° ↓<span id="wx-lo">--</span>°</div>
-        </div>
-      </div>
-      <div class="forecast" id="forecast"></div>
-    </div>
-    <div class="pane" style="flex:1">
-      <div class="sh">// TASKS</div>
-      <div id="tasks"></div>
-    </div>
+  <!-- COL 2 row 1: Agenda -->
+  <div class="p-agenda">
+    <div class="sh"><span class="en">AGENDA</span><span class="jp">予定</span><span class="seq">// 02</span></div>
+    <div id="agenda"></div>
   </div>
 
-  <!-- ── RIGHT: Agenda + Alerts ── -->
-  <div class="col">
-    <div class="pane" style="flex:0 0 auto">
-      <div class="sh">// AGENDA</div>
-      <div id="agenda"></div>
-    </div>
-    <div class="pane" style="flex:1">
-      <div class="sh">// ALERTS</div>
-      <div id="alerts"></div>
-    </div>
+  <!-- COL 2 row 2: SYS -->
+  <div class="p-sys">
+    <div class="sh"><span class="en">SYS</span><span class="jp">状態</span><span class="seq">// 03</span></div>
+    <div class="sys-grid" id="sys-grid"></div>
+    <div class="sys-meta" id="sys-meta"></div>
+  </div>
+
+  <!-- COL 3 row 1: Budget -->
+  <div class="p-budget">
+    <div class="sh"><span class="en">$</span><span class="jp">予算</span><span class="seq">// 04</span></div>
+    <div class="bgt-total">$<span id="bgt-spent">--</span></div>
+    <div class="bgt-sub">/ $<span id="bgt-cap">--</span> · <span id="bgt-mo">---</span></div>
+    <div class="bgt-bar"><div class="bgt-bar-fill" id="bgt-bar" style="width:0%"></div></div>
+    <div class="bgt-cats" id="bgt-cats"></div>
+  </div>
+
+  <!-- COL 3 row 2: OPS (tasks + alerts) -->
+  <div class="p-ops">
+    <div class="sh"><span class="en">OPS</span><span class="jp">作業</span><span class="seq">// 05</span></div>
+    <div style="flex:1;overflow:hidden" id="tasks"></div>
+    <div class="alts" id="alerts"></div>
   </div>
 
 </div>
 
+<!-- Footer -->
 <div class="footer">
-  <span class="footer-motto" id="motto"></span>
-  <span id="last-seen"></span>
+  <span>SYNC <span id="ft-last">--:--</span>→<span id="ft-next">--:--</span></span>
+  <span class="online">● ONLINE</span>
+  <span class="jp">東京 ・ neo / TRMNL</span>
 </div>
 
 <script>
-const COND_ICON = {
-  SUN:'☀', CLOUD:'⛅', RAIN:'🌧', STORM:'⛈', SNOW:'❄', FOG:'🌫', WIND:'💨'
-};
-
-function pct(n){ return Math.min(Math.max(n,0),100); }
-
-function barClass(v, warnAt=70, critAt=90){
-  return v>=critAt?'crit':v>=warnAt?'warn':'ok';
-}
-
-function renderHosts(hosts){
-  return hosts.map(h=>`
-    <div class="host">
-      <div class="host-hdr">
-        <span class="host-name">${h.name.toUpperCase()}</span>
-        <span class="host-meta">${h.cpu_temp}°C · ${h.uptime_days}d up · [${h.load.map(x=>x.toFixed(1)).join(' ')}]</span>
-      </div>
-      <div class="bar-row">
-        <span class="bar-lbl">CPU</span>
-        <div class="bar-track"><div class="bar-fill ${barClass(h.cpu)}" style="width:${pct(h.cpu)}%"></div></div>
-        <span class="bar-num">${h.cpu}%</span>
-      </div>
-      <div class="bar-row">
-        <span class="bar-lbl">RAM</span>
-        <div class="bar-track"><div class="bar-fill ${barClass(h.ram_pct,75,90)}" style="width:${pct(h.ram_pct)}%"></div></div>
-        <span class="bar-num">${h.ram_pct}%</span>
-      </div>
-      <div class="bar-row">
-        <span class="bar-lbl">DSK</span>
-        <div class="bar-track"><div class="bar-fill ${barClass(h.disk_pct,80,95)}" style="width:${pct(h.disk_pct)}%"></div></div>
-        <span class="bar-num">${h.disk_pct}%</span>
-      </div>
-    </div>`).join('');
-}
-
-function renderForecast(days){
-  return days.map(f=>`
-    <div class="fc-day">
-      <div class="fc-name">${f.day}</div>
-      <div class="fc-icon">${COND_ICON[f.cond]||f.cond}</div>
-      <div class="fc-tmp">${f.hi}°/${f.lo}°</div>
-    </div>`).join('');
-}
-
-function renderTasks(tasks){
-  return tasks.map(t=>{
-    const done = t.done;
-    return `
-      <div class="task">
-        <span class="task-chk ${done?'':'open'}">${done?'✓':'○'}</span>
-        <span class="task-txt ${done?'done':''}">${t.text}</span>
-        <span class="task-pri ${t.priority.toLowerCase()}">${t.priority}</span>
-      </div>`;
-  }).join('');
-}
-
-function renderAgenda(items){
-  return items.map(a=>`
-    <div class="ev">
-      <span class="ev-time">${a.time}</span>
-      <div class="ev-body">
-        <div class="ev-title">${a.title}</div>
-        <span class="ev-tag">${a.tag}</span>
-      </div>
-    </div>`).join('');
-}
-
-function renderAlerts(alerts){
-  return alerts.map(a=>`
-    <div class="alert">
-      <span class="alert-lvl ${a.level.toLowerCase()}">${a.level}</span>
-      <span class="alert-msg">${a.message}</span>
-    </div>`).join('');
-}
-
-function renderBudgetCats(cats){
-  return cats.map(c=>{
-    const p = pct(Math.round(c.spent/c.cap*100));
-    const over = p>=100;
-    return `
-      <div class="bgt-cat">
-        <span class="bgt-cat-lbl">${c.label}</span>
-        <div class="bgt-cat-track"><div class="bgt-cat-fill ${over?'over':''}" style="width:${p}%"></div></div>
-        <span class="bgt-cat-amt">${c.spent}/${c.cap}</span>
-      </div>`;
-  }).join('');
-}
-
-async function load(){
-  const d = await fetch('/api/data').then(r=>r.json());
+async function load() {
+  const d = await fetch('/api/data').then(r => r.json());
+  const host = (d.hosts || [])[0] || {};
 
   // Header
-  document.getElementById('hdr-dow').textContent  = d.date_dow;
-  document.getElementById('hdr-date').textContent = d.date;
-  document.getElementById('hdr-time').textContent = d.time;
-
-  // Battery
-  const batt = d.device?.battery_pct ?? 0;
-  const bf = document.getElementById('batt-fill');
-  bf.style.width = pct(batt)+'%';
-  bf.className = 'batt-fill'+(batt<=20?' crit':batt<=40?' warn':'');
-  document.getElementById('batt-pct').textContent = batt+'%';
-
-  // Signal bars
+  document.getElementById('hdr-motto').textContent = d.motto || 'STAY PARANOID. STAY ONLINE.';
+  document.getElementById('hdr-date').textContent  = `${d.date_dow} · ${d.date}`;
+  document.getElementById('hdr-bat').textContent   = d.device?.battery_pct ?? '--';
   const rssi  = d.device?.rssi ?? -100;
-  const bars  = rssi>-55?4:rssi>-70?3:rssi>-80?2:rssi>-90?1:0;
-  document.querySelectorAll('.sig span').forEach((el,i)=>{
-    el.style.background = i<bars?'#fff':'#333';
-  });
+  const bars  = rssi > -55 ? 4 : rssi > -70 ? 3 : rssi > -80 ? 2 : rssi > -90 ? 1 : 0;
+  document.getElementById('hdr-sig').textContent   = '●'.repeat(bars) + '○'.repeat(4 - bars);
 
-  // Sections
-  document.getElementById('hosts').innerHTML   = renderHosts(d.hosts||[]);
-  document.getElementById('forecast').innerHTML= renderForecast(d.weather?.forecast||[]);
-  document.getElementById('wx-temp').textContent = (d.weather?.temp_c??'--')+'°';
-  document.getElementById('wx-cond').textContent = d.weather?.condition??'';
-  document.getElementById('wx-hi').textContent   = d.weather?.hi??'--';
-  document.getElementById('wx-lo').textContent   = d.weather?.lo??'--';
+  // Weather
+  const wx = d.weather || {};
+  document.getElementById('wx-temp').textContent = wx.temp_c ?? '--';
+  document.getElementById('wx-cond').textContent = wx.condition ?? '';
+  document.getElementById('wx-hi').textContent   = wx.hi ?? '--';
+  document.getElementById('wx-lo').textContent   = wx.lo ?? '--';
+  document.getElementById('forecast').innerHTML  = (wx.forecast || []).map(f => `
+    <div class="fc">
+      <div class="fc-d">${f.day}</div>
+      <div class="fc-hi">${f.hi}°</div>
+      <div class="fc-lo">${f.lo}° ${f.cond}</div>
+    </div>`).join('');
 
-  document.getElementById('tasks').innerHTML   = renderTasks(d.tasks||[]);
-  document.getElementById('agenda').innerHTML  = renderAgenda(d.agenda||[]);
-  document.getElementById('alerts').innerHTML  = renderAlerts(d.alerts||[]);
+  // Agenda
+  document.getElementById('agenda').innerHTML = (d.agenda || []).map((a, i) => `
+    <div class="ev">
+      <div class="ev-t${i === 0 ? ' first' : ''}">${a.time}</div>
+      <div class="ev-title">${a.title}</div>
+      <div class="ev-tag">${a.tag}</div>
+    </div>`).join('');
+
+  // SYS
+  const metrics = [
+    { l: 'CPU', v: host.cpu ?? 0,      u: '%' },
+    { l: 'TMP', v: host.cpu_temp ?? 0, u: '°' },
+    { l: 'RAM', v: host.ram_pct ?? 0,  u: '%' },
+    { l: 'DSK', v: host.disk_pct ?? 0, u: '%' },
+  ];
+  document.getElementById('sys-grid').innerHTML = metrics.map(m => `
+    <div class="box">
+      <div class="box-lbl">${m.l}</div>
+      <div class="box-val">${m.v}<span class="u">${m.u}</span></div>
+      <div class="box-bar"><div class="box-bar-fill${m.v > 70 ? ' hot' : ''}" style="width:${Math.min(m.v, 100)}%"></div></div>
+    </div>`).join('');
+  document.getElementById('sys-meta').innerHTML =
+    `<span>HOST ${(host.name || '').toUpperCase()}</span>` +
+    `<span>UPTIME ${host.uptime_days ?? '--'}d</span>` +
+    `<span>LOAD ${(host.load || []).map(x => x.toFixed(2)).join(' / ')}</span>`;
 
   // Budget
-  const bgt = d.budget||{};
-  document.getElementById('bgt-mo').textContent    = bgt.month_label||'';
-  document.getElementById('bgt-spent').textContent = bgt.spent||0;
-  document.getElementById('bgt-cap').textContent   = bgt.cap||0;
-  const bp = bgt.cap ? Math.round(bgt.spent/bgt.cap*100) : 0;
-  document.getElementById('bgt-pct').textContent   = bp+'%';
-  const bbar = document.getElementById('bgt-bar');
-  bbar.style.width = pct(bp)+'%';
-  bbar.className = 'bar-fill '+(bp>=100?'crit':bp>=80?'warn':'ok');
-  document.getElementById('bgt-cats').innerHTML = renderBudgetCats(bgt.cats||[]);
+  const bgt = d.budget || {};
+  document.getElementById('bgt-spent').textContent = bgt.spent ?? '--';
+  document.getElementById('bgt-cap').textContent   = bgt.cap ?? '--';
+  document.getElementById('bgt-mo').textContent    = bgt.month_label ?? '';
+  const bp = bgt.cap ? Math.min((bgt.spent / bgt.cap) * 100, 100) : 0;
+  document.getElementById('bgt-bar').style.width = bp + '%';
+  document.getElementById('bgt-cats').innerHTML = (bgt.cats || []).flatMap(c => {
+    const p   = c.cap ? Math.min((c.spent / c.cap) * 100, 100) : 0;
+    const hot = p / 100 > 0.85;
+    return [
+      `<span class="bgt-k">${c.label}</span>`,
+      `<div class="bgt-track"><div class="bgt-fill${hot ? ' hot' : ''}" style="width:${p}%"></div></div>`,
+      `<span class="bgt-v">$${c.spent}</span>`,
+    ];
+  }).join('');
+
+  // Tasks
+  document.getElementById('tasks').innerHTML = (d.tasks || []).slice(0, 4).map(t => `
+    <div class="task">
+      <span>${t.done ? '■' : '□'}</span>
+      <span class="task-p${t.priority === 'HI' ? ' hi' : ''}">${t.priority}</span>
+      <span class="task-t${t.done ? ' done' : ''}">${t.text}</span>
+    </div>`).join('');
+
+  // Alerts
+  document.getElementById('alerts').innerHTML = (d.alerts || []).slice(0, 2).map(a => `
+    <div class="alt">
+      <span class="alt-l ${a.level.toLowerCase()}">${a.level}</span>
+      <span class="alt-m">${a.message}</span>
+    </div>`).join('');
 
   // Footer
-  document.getElementById('motto').textContent     = d.motto||'';
-  document.getElementById('last-seen').textContent = d.device?.last_seen ? 'SYNC '+d.device.last_seen : '';
+  document.getElementById('ft-last').textContent = d.last_sync ?? d.time ?? '--';
+  document.getElementById('ft-next').textContent = d.next_sync ?? '--';
 
-  document.documentElement.setAttribute('data-ready','true');
+  // Wait for web fonts before signalling ready
+  await document.fonts.ready;
+  document.documentElement.setAttribute('data-ready', 'true');
 }
 
-load().catch(err=>{
+load().catch(err => {
   console.error(err);
-  document.getElementById('motto').textContent = 'RENDER ERROR: '+err.message;
-  document.documentElement.setAttribute('data-ready','true');
+  document.documentElement.setAttribute('data-ready', 'true');
 });
 </script>
 </body>
