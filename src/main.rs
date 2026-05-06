@@ -169,7 +169,7 @@ fn downscale_supersampled(input: &[u8]) -> anyhow::Result<Vec<u8>> {
 /// Pack one nibble per pixel, two pixels per byte, with the high nibble first.
 /// Rows are padded to a whole byte (PNG requirement for sub-byte bit depths).
 fn pack_nibbles(indices: &[u8], width: usize) -> Vec<u8> {
-    let row_bytes = (width + 1) / 2;
+    let row_bytes = width.div_ceil(2);
     let height = indices.len() / width;
     let mut out = vec![0u8; row_bytes * height];
     for y in 0..height {
