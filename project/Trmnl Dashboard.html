@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TRMNL · Cyberpunk Dashboard — e1002 800×480</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@500;700;800&family=Barlow+Condensed:wght@500;600;700&family=Noto+Sans+JP:wght@500;700;900&display=swap" rel="stylesheet" />
+<style>
+  html, body { margin: 0; padding: 0; background: #d6d3cd; font-family: ui-sans-serif, system-ui, sans-serif; }
+  * { box-sizing: border-box; }
+  /* keep e-ink content crisp */
+  .eink-frame {
+    background: #fff;
+    box-shadow:
+      0 0 0 1px rgba(0,0,0,0.5),
+      0 0 0 8px #1a1a1a,
+      0 0 0 9px rgba(0,0,0,0.6),
+      0 30px 60px rgba(0,0,0,0.35);
+    image-rendering: pixelated;
+  }
+  /* Tiny overlay label tucked in the artboard */
+  .flavor-tag {
+    position: absolute; top: -22px; left: 0;
+    font: 700 10px/1 ui-monospace, monospace;
+    letter-spacing: 2px; color: #2a2a2a;
+  }
+  .flavor-tag span { color: #c1121f; }
+</style>
+</head>
+<body>
+
+<!-- React + Babel pinned -->
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+
+<script type="text/babel" src="data.jsx"></script>
+<script type="text/babel" src="v1-terminal.jsx"></script>
+<script type="text/babel" src="v2-neotokyo.jsx"></script>
+<script type="text/babel" src="v3-corp.jsx"></script>
+
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect } = React;
+
+// --- Tweakable defaults (persisted by the host) -------------
+const TWEAKS_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "accent": "#c1121f"
+}/*EDITMODE-END*/;
+
+// Curated accent palette — limited to the e-ink Spectra 6 colors.
+// Each value is what we render on screen. Order: red / blue / green / yellow / black.
+const ACCENTS = [
+  "#c1121f", // red
+  "#1e3a8a", // blue
+  "#1f7a3a", // green
+  "#d4a200", // yellow
+  "#000000", // black-only
+];
+
+function Wrap({ children, label, sub }) {
+  // Label sits OUTSIDE the 800x480 artboard, so it never appears on the
+  // actual e-ink frame.
+  return (
+    <div style={{ position: "relative", paddingTop: 26 }}>
+      <div className="flavor-tag">
+        <span>▌</span> {label} <span style={{ opacity: 0.5, marginLeft: 6 }}>{sub}</span>
+      </div>
+      <div className="eink-frame" style={{ width: 800, height: 480 }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [tweaks, setTweak] = window.useTweaks
+    ? window.useTweaks(TWEAKS_DEFAULTS)
+    : [TWEAKS_DEFAULTS, () => {}];
+
+  return (
+    <>
+      <window.DesignCanvas>
+        <window.DCSection id="cyberpunk" title="TRMNL · Cyberpunk Dashboards" subtitle="Seeed e1002 · 800×480 · Spectra 6-color e-ink · 4 explorations">
+          <window.DCArtboard id="terminal" label="01 · Terminal / CRT" width={820} height={510}>
+            <Wrap label="TERMINAL" sub="VT100 · ASCII · mono">
+              <window.TerminalDashboard accent={tweaks.accent} />
+            </Wrap>
+          </window.DCArtboard>
+
+          <window.DCArtboard id="neotokyo" label="02 · Neo-Tokyo" width={820} height={510}>
+            <Wrap label="NEO-TOKYO" sub="brutalist · katakana · stripes">
+              <window.NeoTokyoDashboard accent={tweaks.accent} />
+            </Wrap>
+          </window.DCArtboard>
+
+          <window.DCArtboard id="corp" label="03 · Corporate Dystopia" width={820} height={510}>
+            <Wrap label="CORP" sub="Severance · file-clerk · industrial">
+              <window.CorpDashboard accent={tweaks.accent} />
+            </Wrap>
+          </window.DCArtboard>
+
+        </window.DCSection>
+      </window.DesignCanvas>
+
+      {window.TweaksPanel && (
+        <window.TweaksPanel title="Tweaks">
+          <window.TweakSection title="Accent color"
+            description="Limited to the e-ink Spectra 6 palette. Affects flavors 01·02·03 (HUD uses its own multi-color scheme).">
+            <window.TweakColor
+              label="accent"
+              value={tweaks.accent}
+              options={ACCENTS}
+              onChange={(v) => setTweak("accent", v)}
+            />
+          </window.TweakSection>
+          <window.TweakSection title="Tip">
+            <div style={{ fontSize: 12, lineHeight: 1.4, opacity: 0.8 }}>
+              Drag artboards to reorder, or click any frame's <b>focus</b> button to view full-size at 1:1.
+              The black bezel around each frame previews how it'll look mounted.
+            </div>
+          </window.TweakSection>
+        </window.TweaksPanel>
+      )}
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+
+</body>
+</html>
