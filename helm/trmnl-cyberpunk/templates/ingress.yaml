@@ -2,9 +2,9 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "trmnl-seedbox.fullname" . }}
+  name: {{ include "trmnl-cyberpunk.fullname" . }}
   labels:
-    {{- include "trmnl-seedbox.labels" . | nindent 4 }}
+    {{- include "trmnl-cyberpunk.labels" . | nindent 4 }}
   {{- with .Values.ingress.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -27,7 +27,7 @@ spec:
             pathType: {{ .pathType }}
             backend:
               service:
-                name: {{ include "trmnl-seedbox.fullname" $ }}
+                name: {{ include "trmnl-cyberpunk.fullname" $ }}
                 port:
                   name: http
           {{- end }}

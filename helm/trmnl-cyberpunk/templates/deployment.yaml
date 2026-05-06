@@ -1,9 +1,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "trmnl-seedbox.fullname" . }}
+  name: {{ include "trmnl-cyberpunk.fullname" . }}
   labels:
-    {{- include "trmnl-seedbox.labels" . | nindent 4 }}
+    {{- include "trmnl-cyberpunk.labels" . | nindent 4 }}
   {{- with .Values.podAnnotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -12,11 +12,11 @@ spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      {{- include "trmnl-seedbox.selectorLabels" . | nindent 6 }}
+      {{- include "trmnl-cyberpunk.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "trmnl-seedbox.selectorLabels" . | nindent 8 }}
+        {{- include "trmnl-cyberpunk.selectorLabels" . | nindent 8 }}
       {{- with .Values.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
@@ -44,9 +44,9 @@ spec:
               protocol: TCP
           envFrom:
             - configMapRef:
-                name: {{ include "trmnl-seedbox.fullname" . }}
+                name: {{ include "trmnl-cyberpunk.fullname" . }}
             - secretRef:
-                name: {{ include "trmnl-seedbox.fullname" . }}
+                name: {{ include "trmnl-cyberpunk.fullname" . }}
           livenessProbe:
             httpGet:
               path: /health

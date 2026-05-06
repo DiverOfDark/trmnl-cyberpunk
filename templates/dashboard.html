@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+/* === Palette ===
+   Black   #000000   White   #ffffff
+   Blue    #0055cc   Red     #cc0000
+   Yellow  #ccaa00   Green   #007700          */
+
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{
+  width:800px;height:480px;overflow:hidden;
+  background:#000;color:#fff;
+  font-family:'Courier New',Courier,monospace;
+  font-size:11px;line-height:1.25;
+}
+
+/* ── Header ── */
+.hdr{
+  width:800px;height:36px;
+  background:#0055cc;color:#fff;
+  display:flex;align-items:center;
+  padding:0 8px;gap:10px;
+  border-bottom:2px solid #ccaa00;
+}
+.hdr-logo{font-weight:bold;font-size:13px;letter-spacing:3px;white-space:nowrap}
+.hdr-sep{flex:1}
+.hdr-dt{font-size:11px;white-space:nowrap}
+.hdr-batt{display:flex;align-items:center;gap:4px;white-space:nowrap;font-size:10px}
+.batt-shell{
+  width:28px;height:11px;border:1px solid #fff;position:relative;display:inline-block;
+}
+.batt-shell::after{
+  content:'';position:absolute;right:-4px;top:2px;width:3px;height:5px;background:#fff;
+}
+.batt-fill{height:100%;background:#007700;transition:none}
+.batt-fill.warn{background:#ccaa00}
+.batt-fill.crit{background:#cc0000}
+.sig{display:flex;gap:2px;align-items:flex-end}
+.sig span{width:4px;background:#fff;display:block}
+
+/* ── 3-column grid ── */
+.grid{
+  display:grid;
+  grid-template-columns:240px 268px 292px;
+  height:444px;
+}
+.col{display:flex;flex-direction:column;border-right:1px solid #222;overflow:hidden}
+.col:last-child{border-right:none}
+.pane{padding:5px 6px;border-bottom:1px solid #222;overflow:hidden}
+.pane:last-child{border-bottom:none;flex:1}
+
+/* ── Section labels ── */
+.sh{
+  color:#0055cc;font-size:9px;font-weight:bold;letter-spacing:2px;
+  border-bottom:1px solid #0055cc;padding-bottom:2px;margin-bottom:5px;
+}
+
+/* ── Progress bars ── */
+.bar-row{display:flex;align-items:center;gap:4px;margin-bottom:3px}
+.bar-lbl{font-size:9px;color:#888;width:26px}
+.bar-track{flex:1;height:5px;background:#1a1a1a;border:1px solid #333}
+.bar-fill{height:100%;background:#fff}
+.bar-fill.ok{background:#007700}
+.bar-fill.warn{background:#ccaa00}
+.bar-fill.crit{background:#cc0000}
+.bar-num{font-size:9px;width:24px;text-align:right;color:#aaa}
+
+/* ── Hosts ── */
+.host{margin-bottom:7px}
+.host-hdr{display:flex;justify-content:space-between;margin-bottom:2px}
+.host-name{color:#0055cc;font-weight:bold;font-size:11px}
+.host-meta{font-size:9px;color:#555}
+
+/* ── Budget ── */
+.bgt-hdr{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px}
+.bgt-mo{color:#0055cc;font-size:10px;font-weight:bold}
+.bgt-tot{font-size:11px;font-weight:bold}
+.bgt-cat{display:flex;align-items:center;gap:4px;margin-bottom:2px}
+.bgt-cat-lbl{font-size:9px;color:#888;width:30px}
+.bgt-cat-track{flex:1;height:5px;background:#1a1a1a;border:1px solid #333}
+.bgt-cat-fill{height:100%;background:#007700}
+.bgt-cat-fill.over{background:#cc0000}
+.bgt-cat-amt{font-size:9px;color:#555;width:52px;text-align:right}
+
+/* ── Weather ── */
+.wx-now{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.wx-temp{font-size:32px;font-weight:bold;line-height:1;color:#ccaa00}
+.wx-detail{font-size:10px;color:#aaa}
+.wx-cond{font-size:11px;color:#fff;margin-bottom:2px}
+.forecast{display:grid;grid-template-columns:repeat(4,1fr);gap:3px}
+.fc-day{text-align:center;border:1px solid #222;padding:2px 0}
+.fc-name{font-size:9px;color:#0055cc;font-weight:bold}
+.fc-icon{font-size:13px}
+.fc-tmp{font-size:9px;color:#aaa}
+
+/* ── Tasks ── */
+.task{display:flex;align-items:baseline;gap:4px;margin-bottom:3px}
+.task-chk{font-size:11px;width:12px;color:#007700}
+.task-chk.open{color:#555}
+.task-txt{flex:1;font-size:10px;line-height:1.3}
+.task-txt.done{color:#444;text-decoration:line-through}
+.task-pri{font-size:8px;padding:0 3px;border:1px solid;line-height:14px}
+.task-pri.hi{color:#cc0000;border-color:#cc0000}
+.task-pri.med{color:#ccaa00;border-color:#ccaa00}
+.task-pri.low{color:#444;border-color:#444}
+
+/* ── Agenda ── */
+.ev{display:flex;gap:5px;margin-bottom:4px;align-items:flex-start}
+.ev-time{color:#ccaa00;font-size:10px;min-width:38px;white-space:nowrap}
+.ev-body{flex:1}
+.ev-title{font-size:10px;line-height:1.3}
+.ev-tag{font-size:8px;color:#0055cc;border:1px solid #0055cc;padding:0 3px;display:inline-block;margin-top:1px}
+
+/* ── Alerts ── */
+.alert{display:flex;gap:4px;margin-bottom:4px;align-items:flex-start}
+.alert-lvl{font-size:8px;font-weight:bold;padding:1px 3px;white-space:nowrap;line-height:13px}
+.alert-lvl.err{background:#cc0000;color:#fff}
+.alert-lvl.wrn{background:#ccaa00;color:#000}
+.alert-lvl.inf{background:#0055cc;color:#fff}
+.alert-msg{font-size:9px;color:#bbb;line-height:1.4}
+
+/* ── Footer ── */
+.footer{
+  position:absolute;bottom:0;left:0;right:0;height:16px;
+  display:flex;align-items:center;padding:0 8px;gap:8px;
+  background:#0a0a0a;border-top:1px solid #1a1a1a;
+  font-size:9px;color:#333;
+}
+.footer-motto{flex:1;letter-spacing:1px}
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <span class="hdr-logo">▓ TRMNL//CYBERPUNK</span>
+  <span class="hdr-sep"></span>
+  <span class="hdr-dt" id="hdr-dow">---</span>
+  <span class="hdr-dt" id="hdr-date">-- --- ----</span>
+  <span class="hdr-dt" id="hdr-time">--:--</span>
+  <span class="hdr-batt">
+    BATT
+    <span class="batt-shell"><span class="batt-fill" id="batt-fill" style="width:0%"></span></span>
+    <span id="batt-pct">--%</span>
+  </span>
+  <span class="sig" id="sig">
+    <span style="height:4px"></span>
+    <span style="height:7px"></span>
+    <span style="height:10px"></span>
+    <span style="height:13px"></span>
+  </span>
+</div>
+
+<div class="grid">
+
+  <!-- ── LEFT: Hosts + Budget ── -->
+  <div class="col">
+    <div class="pane" style="flex:0 0 auto">
+      <div class="sh">// HOSTS</div>
+      <div id="hosts"></div>
+    </div>
+    <div class="pane" style="flex:1">
+      <div class="sh">// BUDGET</div>
+      <div class="bgt-hdr">
+        <span class="bgt-mo" id="bgt-mo">---</span>
+        <span class="bgt-tot"><span id="bgt-spent">--</span>/<span id="bgt-cap">--</span> EUR</span>
+      </div>
+      <div class="bar-row" style="margin-bottom:6px">
+        <div class="bar-track" style="flex:1"><div class="bar-fill" id="bgt-bar" style="width:0%"></div></div>
+        <span class="bar-num" id="bgt-pct">--%</span>
+      </div>
+      <div id="bgt-cats"></div>
+    </div>
+  </div>
+
+  <!-- ── MIDDLE: Weather + Tasks ── -->
+  <div class="col">
+    <div class="pane" style="flex:0 0 auto">
+      <div class="sh">// WEATHER</div>
+      <div class="wx-now">
+        <span class="wx-temp" id="wx-temp">--°</span>
+        <div>
+          <div class="wx-cond" id="wx-cond">---</div>
+          <div class="wx-detail">↑<span id="wx-hi">--</span>° ↓<span id="wx-lo">--</span>°</div>
+        </div>
+      </div>
+      <div class="forecast" id="forecast"></div>
+    </div>
+    <div class="pane" style="flex:1">
+      <div class="sh">// TASKS</div>
+      <div id="tasks"></div>
+    </div>
+  </div>
+
+  <!-- ── RIGHT: Agenda + Alerts ── -->
+  <div class="col">
+    <div class="pane" style="flex:0 0 auto">
+      <div class="sh">// AGENDA</div>
+      <div id="agenda"></div>
+    </div>
+    <div class="pane" style="flex:1">
+      <div class="sh">// ALERTS</div>
+      <div id="alerts"></div>
+    </div>
+  </div>
+
+</div>
+
+<div class="footer">
+  <span class="footer-motto" id="motto"></span>
+  <span id="last-seen"></span>
+</div>
+
+<script>
+const COND_ICON = {
+  SUN:'☀', CLOUD:'⛅', RAIN:'🌧', STORM:'⛈', SNOW:'❄', FOG:'🌫', WIND:'💨'
+};
+
+function pct(n){ return Math.min(Math.max(n,0),100); }
+
+function barClass(v, warnAt=70, critAt=90){
+  return v>=critAt?'crit':v>=warnAt?'warn':'ok';
+}
+
+function renderHosts(hosts){
+  return hosts.map(h=>`
+    <div class="host">
+      <div class="host-hdr">
+        <span class="host-name">${h.name.toUpperCase()}</span>
+        <span class="host-meta">${h.cpu_temp}°C · ${h.uptime_days}d up · [${h.load.map(x=>x.toFixed(1)).join(' ')}]</span>
+      </div>
+      <div class="bar-row">
+        <span class="bar-lbl">CPU</span>
+        <div class="bar-track"><div class="bar-fill ${barClass(h.cpu)}" style="width:${pct(h.cpu)}%"></div></div>
+        <span class="bar-num">${h.cpu}%</span>
+      </div>
+      <div class="bar-row">
+        <span class="bar-lbl">RAM</span>
+        <div class="bar-track"><div class="bar-fill ${barClass(h.ram_pct,75,90)}" style="width:${pct(h.ram_pct)}%"></div></div>
+        <span class="bar-num">${h.ram_pct}%</span>
+      </div>
+      <div class="bar-row">
+        <span class="bar-lbl">DSK</span>
+        <div class="bar-track"><div class="bar-fill ${barClass(h.disk_pct,80,95)}" style="width:${pct(h.disk_pct)}%"></div></div>
+        <span class="bar-num">${h.disk_pct}%</span>
+      </div>
+    </div>`).join('');
+}
+
+function renderForecast(days){
+  return days.map(f=>`
+    <div class="fc-day">
+      <div class="fc-name">${f.day}</div>
+      <div class="fc-icon">${COND_ICON[f.cond]||f.cond}</div>
+      <div class="fc-tmp">${f.hi}°/${f.lo}°</div>
+    </div>`).join('');
+}
+
+function renderTasks(tasks){
+  return tasks.map(t=>{
+    const done = t.done;
+    return `
+      <div class="task">
+        <span class="task-chk ${done?'':'open'}">${done?'✓':'○'}</span>
+        <span class="task-txt ${done?'done':''}">${t.text}</span>
+        <span class="task-pri ${t.priority.toLowerCase()}">${t.priority}</span>
+      </div>`;
+  }).join('');
+}
+
+function renderAgenda(items){
+  return items.map(a=>`
+    <div class="ev">
+      <span class="ev-time">${a.time}</span>
+      <div class="ev-body">
+        <div class="ev-title">${a.title}</div>
+        <span class="ev-tag">${a.tag}</span>
+      </div>
+    </div>`).join('');
+}
+
+function renderAlerts(alerts){
+  return alerts.map(a=>`
+    <div class="alert">
+      <span class="alert-lvl ${a.level.toLowerCase()}">${a.level}</span>
+      <span class="alert-msg">${a.message}</span>
+    </div>`).join('');
+}
+
+function renderBudgetCats(cats){
+  return cats.map(c=>{
+    const p = pct(Math.round(c.spent/c.cap*100));
+    const over = p>=100;
+    return `
+      <div class="bgt-cat">
+        <span class="bgt-cat-lbl">${c.label}</span>
+        <div class="bgt-cat-track"><div class="bgt-cat-fill ${over?'over':''}" style="width:${p}%"></div></div>
+        <span class="bgt-cat-amt">${c.spent}/${c.cap}</span>
+      </div>`;
+  }).join('');
+}
+
+async function load(){
+  const d = await fetch('/api/data').then(r=>r.json());
+
+  // Header
+  document.getElementById('hdr-dow').textContent  = d.date_dow;
+  document.getElementById('hdr-date').textContent = d.date;
+  document.getElementById('hdr-time').textContent = d.time;
+
+  // Battery
+  const batt = d.device?.battery_pct ?? 0;
+  const bf = document.getElementById('batt-fill');
+  bf.style.width = pct(batt)+'%';
+  bf.className = 'batt-fill'+(batt<=20?' crit':batt<=40?' warn':'');
+  document.getElementById('batt-pct').textContent = batt+'%';
+
+  // Signal bars
+  const rssi  = d.device?.rssi ?? -100;
+  const bars  = rssi>-55?4:rssi>-70?3:rssi>-80?2:rssi>-90?1:0;
+  document.querySelectorAll('.sig span').forEach((el,i)=>{
+    el.style.background = i<bars?'#fff':'#333';
+  });
+
+  // Sections
+  document.getElementById('hosts').innerHTML   = renderHosts(d.hosts||[]);
+  document.getElementById('forecast').innerHTML= renderForecast(d.weather?.forecast||[]);
+  document.getElementById('wx-temp').textContent = (d.weather?.temp_c??'--')+'°';
+  document.getElementById('wx-cond').textContent = d.weather?.condition??'';
+  document.getElementById('wx-hi').textContent   = d.weather?.hi??'--';
+  document.getElementById('wx-lo').textContent   = d.weather?.lo??'--';
+
+  document.getElementById('tasks').innerHTML   = renderTasks(d.tasks||[]);
+  document.getElementById('agenda').innerHTML  = renderAgenda(d.agenda||[]);
+  document.getElementById('alerts').innerHTML  = renderAlerts(d.alerts||[]);
+
+  // Budget
+  const bgt = d.budget||{};
+  document.getElementById('bgt-mo').textContent    = bgt.month_label||'';
+  document.getElementById('bgt-spent').textContent = bgt.spent||0;
+  document.getElementById('bgt-cap').textContent   = bgt.cap||0;
+  const bp = bgt.cap ? Math.round(bgt.spent/bgt.cap*100) : 0;
+  document.getElementById('bgt-pct').textContent   = bp+'%';
+  const bbar = document.getElementById('bgt-bar');
+  bbar.style.width = pct(bp)+'%';
+  bbar.className = 'bar-fill '+(bp>=100?'crit':bp>=80?'warn':'ok');
+  document.getElementById('bgt-cats').innerHTML = renderBudgetCats(bgt.cats||[]);
+
+  // Footer
+  document.getElementById('motto').textContent     = d.motto||'';
+  document.getElementById('last-seen').textContent = d.device?.last_seen ? 'SYNC '+d.device.last_seen : '';
+
+  document.documentElement.setAttribute('data-ready','true');
+}
+
+load().catch(err=>{
+  console.error(err);
+  document.getElementById('motto').textContent = 'RENDER ERROR: '+err.message;
+  document.documentElement.setAttribute('data-ready','true');
+});
+</script>
+</body>
+</html>

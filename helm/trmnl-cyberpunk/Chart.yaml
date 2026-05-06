@@ -1,6 +1,6 @@
 apiVersion: v2
-name: trmnl-seedbox
-description: Neo-Tokyo TRMNL BYOS dashboard server for the Seeed e1002 e-ink display
+name: trmnl-cyberpunk
+description: Cyberpunk TRMNL BYOS dashboard — HTML/Chromium rendered, Spectra 6-color e-ink
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
@@ -10,7 +10,7 @@ keywords:
   - homelab
   - dashboard
 sources:
-  - https://github.com/DiverOfDark/trmnl-seedbox
+  - https://github.com/DiverOfDark/trmnl-cyberpunk
 maintainers:
   - name: DiverOfDark
     url: https://github.com/DiverOfDark

@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/diverofdark/trmnl-seedbox
+  repository: ghcr.io/diverofdark/trmnl-cyberpunk
   pullPolicy: Always
   # Overrides the image tag (defaults to Chart.appVersion)
   tag: ""
@@ -28,26 +28,20 @@ ingress:
 
 resources:
   limits:
-    cpu: 500m
-    memory: 256Mi
+    cpu: 1000m
+    memory: 512Mi
   requests:
-    cpu: 50m
-    memory: 64Mi
+    cpu: 100m
+    memory: 128Mi
 
 # Base URL the TRMNL device will use to fetch images — must be reachable from the device.
-# Set to your node/ingress/LoadBalancer address.
-baseUrl: "http://trmnl-seedbox:8080"
+baseUrl: "http://trmnl-cyberpunk:8080"
 
 # How often (seconds) the dashboard image is regenerated and the device is asked to refresh.
 refreshSecs: "3600"
 
 # TRMNL API key returned during /api/setup provisioning.
-# Override via --set or a sealed secret.
-trmnlApiKey: "seedbox-byos"
-
-# Persist nothing — the app is stateless (fonts are baked into the image).
-persistence:
-  enabled: false
+trmnlApiKey: "cyberpunk-byos"
 
 podAnnotations: {}
 podSecurityContext: {}

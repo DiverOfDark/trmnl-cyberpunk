@@ -1,21 +1,18 @@
-use chrono::{Datelike, Local, Timelike};
+use chrono::{Datelike, Local};
+use serde::Serialize;
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct HostData {
     pub name: String,
     pub cpu: u8,
     pub cpu_temp: u8,
     pub ram_pct: u8,
-    #[allow(dead_code)] // available for future widgets
-    pub ram_used_gb: f32,
-    #[allow(dead_code)]
-    pub ram_total_gb: u8,
     pub disk_pct: u8,
     pub uptime_days: u32,
     pub load: [f32; 3],
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct WeatherDay {
     pub day: String,
     pub hi: i8,
@@ -23,7 +20,7 @@ pub struct WeatherDay {
     pub cond: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct WeatherData {
     pub temp_c: i8,
     pub condition: String,
@@ -32,58 +29,49 @@ pub struct WeatherData {
     pub forecast: Vec<WeatherDay>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct AgendaItem {
     pub time: String,
     pub title: String,
     pub tag: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct Task {
     pub text: String,
     pub done: bool,
-    pub priority: String, // HI / MED / LOW
+    pub priority: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct BudgetCat {
     pub label: String,
     pub spent: u32,
     pub cap: u32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct BudgetData {
     pub month_label: String,
     pub spent: u32,
     pub cap: u32,
-    #[allow(dead_code)]
-    pub runway_days: u8,
     pub cats: Vec<BudgetCat>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct Alert {
     pub level: String,
-    #[allow(dead_code)]
     pub time: String,
     pub message: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct DashData {
-    pub device: String,
+    pub time: String,
+    pub date: String,
     pub date_dow: String,
-    pub date_display: String,
-    #[allow(dead_code)]
-    pub date_iso: String,
-    pub battery_pct: u8,
-    pub signal_bars: u8, // 0-4
-    pub last_sync: String,
-    pub next_sync: String,
     pub motto: String,
-    pub host: HostData,
+    pub hosts: Vec<HostData>,
     pub weather: WeatherData,
     pub agenda: Vec<AgendaItem>,
     pub tasks: Vec<Task>,
@@ -92,8 +80,6 @@ pub struct DashData {
 }
 
 impl DashData {
-    /// Mock data sourced from github.com/DiverOfDark/homelab —
-    /// Norse-mythology hostnames, Talos/k3s cluster, BudgetTracker app.
     pub fn mock() -> Self {
         let now = Local::now();
         let months = [
@@ -109,35 +95,38 @@ impl DashData {
         let month = months[(now.month() - 1) as usize];
 
         Self {
-            device: "TRMNL-01".into(),
+            time: now.format("%H:%M").to_string(),
+            date: format!("{:02} {} {}", now.day(), month, now.year()),
             date_dow: dow.into(),
-            date_display: format!("{:02} {} {}", now.day(), month, now.year()),
-            date_iso: now.format("%Y-%m-%d").to_string(),
-            battery_pct: 78,
-            signal_bars: 3,
-            last_sync: now.format("%H:%M").to_string(),
-            next_sync: format!("{:02}:{:02}", (now.hour() + 1) % 24, now.minute()),
             motto: "STAY PARANOID. STAY ONLINE.".into(),
-            host: HostData {
-                name: "asgard".into(),
-                cpu: 34,
-                cpu_temp: 58,
-                ram_pct: 62,
-                ram_used_gb: 39.8,
-                ram_total_gb: 64,
-                disk_pct: 47,
-                uptime_days: 142,
-                load: [0.82, 0.74, 0.69],
-            },
+            hosts: vec![
+                HostData {
+                    name: "asgard".into(),
+                    cpu: 34, cpu_temp: 58, ram_pct: 62,
+                    disk_pct: 47, uptime_days: 142,
+                    load: [0.82, 0.74, 0.69],
+                },
+                HostData {
+                    name: "muspelheimr".into(),
+                    cpu: 71, cpu_temp: 71, ram_pct: 81,
+                    disk_pct: 23, uptime_days: 7,
+                    load: [1.92, 1.74, 1.55],
+                },
+                HostData {
+                    name: "niflheimr".into(),
+                    cpu: 12, cpu_temp: 44, ram_pct: 38,
+                    disk_pct: 88, uptime_days: 203,
+                    load: [0.24, 0.18, 0.21],
+                },
+            ],
             weather: WeatherData {
                 temp_c: 14,
                 condition: "RAIN".into(),
-                hi: 17,
-                lo: 9,
+                hi: 17, lo: 9,
                 forecast: vec![
                     WeatherDay { day: "THU".into(), hi: 18, lo: 10, cond: "CLOUD".into() },
-                    WeatherDay { day: "FRI".into(), hi: 21, lo: 11, cond: "SUN".into() },
-                    WeatherDay { day: "SAT".into(), hi: 19, lo: 12, cond: "RAIN".into() },
+                    WeatherDay { day: "FRI".into(), hi: 21, lo: 11, cond: "SUN".into()   },
+                    WeatherDay { day: "SAT".into(), hi: 19, lo: 12, cond: "RAIN".into()  },
                     WeatherDay { day: "SUN".into(), hi: 16, lo:  9, cond: "STORM".into() },
                 ],
             },
@@ -157,7 +146,6 @@ impl DashData {
                 month_label: format!("{} '{}", month, &now.format("%Y").to_string()[2..]),
                 spent: 1842,
                 cap: 2600,
-                runway_days: 18,
                 cats: vec![
                     BudgetCat { label: "RENT".into(),  spent: 980, cap: 980  },
                     BudgetCat { label: "FOOD".into(),  spent: 312, cap: 500  },

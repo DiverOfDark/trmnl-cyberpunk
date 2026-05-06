@@ -9,7 +9,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE: ghcr.io/diverofdark/trmnl-seedbox
+  IMAGE: ghcr.io/diverofdark/trmnl-cyberpunk
   CHART_REPO: ghcr.io/diverofdark/charts
 
 jobs:
@@ -105,17 +105,17 @@ jobs:
 
       - name: Package chart
         run: |
-          helm package helm/trmnl-seedbox \
+          helm package helm/trmnl-cyberpunk \
             --version "${{ steps.version.outputs.version }}" \
             --app-version "${{ steps.version.outputs.version }}" \
             --destination /tmp/charts/
 
       - name: Push chart
         run: |
-          helm push /tmp/charts/trmnl-seedbox-*.tgz oci://${{ env.CHART_REPO }}
+          helm push /tmp/charts/trmnl-cyberpunk-*.tgz oci://${{ env.CHART_REPO }}
 
       - name: Summary
         run: |
           echo "### Published" >> "$GITHUB_STEP_SUMMARY"
           echo "- Image: \`${{ env.IMAGE }}:${{ github.ref_name }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Chart: \`${{ env.CHART_REPO }}/trmnl-seedbox:${{ steps.version.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Chart: \`${{ env.CHART_REPO }}/trmnl-cyberpunk:${{ steps.version.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
