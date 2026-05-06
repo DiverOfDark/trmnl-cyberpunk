@@ -17,6 +17,8 @@ pub struct Sources {
     pub alertmanager: String,
     pub actualbudget_url: String,
     pub actualbudget_key: String,
+    pub actualbudget_sync_id: String,
+    pub actualbudget_password: String,
     pub ics_urls: Vec<String>,
     pub weather_lat: f64,
     pub weather_lon: f64,
@@ -40,9 +42,11 @@ impl Sources {
                 "http://actualbudget-api.actualbudget.svc.cluster.local".into()
             }),
             actualbudget_key: std::env::var("ACTUALBUDGET_KEY").unwrap_or_default(),
+            actualbudget_sync_id: std::env::var("ACTUALBUDGET_SYNC_ID").unwrap_or_default(),
+            actualbudget_password: std::env::var("ACTUALBUDGET_PASSWORD").unwrap_or_default(),
             ics_urls: std::env::var("ICS_URLS")
                 .unwrap_or_default()
-                .split(',')
+                .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
@@ -343,33 +347,60 @@ impl Sources {
 
 // ── ActualBudget HTTP API ─────────────────────────────────────────────────
 
+/// GET an x-api-key-authed endpoint and parse JSON, with detailed error
+/// context on non-2xx or non-JSON bodies — much easier to debug than
+/// reqwest's bare "error decoding response body".
+///
+/// `encryption_password` is sent as `budget-encryption-password` when non-empty;
+/// it's required on the first request against an end-to-end encrypted budget
+/// and harmless on unencrypted ones.
+async fn get_json(
+    client: &Client,
+    url: &str,
+    api_key: &str,
+    encryption_password: &str,
+) -> Result<Value> {
+    let mut req = client.get(url).header("x-api-key", api_key);
+    if !encryption_password.is_empty() {
+        req = req.header("budget-encryption-password", encryption_password);
+    }
+    let resp = req.send().await?;
+    let status = resp.status();
+    let body = resp.text().await?;
+    if !status.is_success() {
+        let snippet: String = body.chars().take(200).collect();
+        return Err(anyhow!("{url} → {status}: {snippet}"));
+    }
+    serde_json::from_str(&body).map_err(|e| {
+        let snippet: String = body.chars().take(200).collect();
+        anyhow!("{url} → JSON decode failed ({e}); body starts: {snippet}")
+    })
+}
+
 impl Sources {
     async fn budget(&self) -> Result<BudgetData> {
         if self.actualbudget_key.is_empty() {
             return Err(anyhow!("ACTUALBUDGET_KEY not set"));
         }
-
-        // Discover budget IDs
-        let budgets: Value = self.client
-            .get(format!("{}/budgets", self.actualbudget_url))
-            .header("x-api-key", &self.actualbudget_key)
-            .send().await?.json().await?;
-
-        let budget_id = budgets.as_array()
-            .and_then(|a| a.first())
-            .and_then(|b| b["id"].as_str())
-            .ok_or_else(|| anyhow!("no budget found"))?
-            .to_string();
+        if self.actualbudget_sync_id.is_empty() {
+            return Err(anyhow!("ACTUALBUDGET_SYNC_ID not set (Actual → Settings → Show advanced settings → Sync ID)"));
+        }
 
         let now   = Local::now();
         let month = format!("{}-{:02}", now.year(), now.month());
 
-        let month_data: Value = self.client
-            .get(format!("{}/budgets/{}/months/{}", self.actualbudget_url, budget_id, month))
-            .header("x-api-key", &self.actualbudget_key)
-            .send().await?.json().await?;
+        let month_data: Value = get_json(
+            &self.client,
+            &format!(
+                "{}/budgets/{}/months/{}",
+                self.actualbudget_url, self.actualbudget_sync_id, month,
+            ),
+            &self.actualbudget_key,
+            &self.actualbudget_password,
+        )
+        .await?;
 
-        let cats_raw = month_data["categoryGroups"]
+        let cats_raw = month_data["data"]["categoryGroups"]
             .as_array()
             .cloned()
             .unwrap_or_default();
