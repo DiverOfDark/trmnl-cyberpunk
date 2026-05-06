@@ -23,4 +23,4 @@ trmnl = { version = "0.1", features = ["axum"] }
 chromiumoxide = { version = "0.7", features = ["tokio-runtime"] }
 futures = "0.3"
 anyhow = "1"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset", "http2"] }
