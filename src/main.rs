@@ -66,6 +66,7 @@ fn build_display_response() -> DisplayResponse {
 async fn screenshot_dashboard(port: u16) -> anyhow::Result<Vec<u8>> {
     use chromiumoxide::{Browser, BrowserConfig};
     use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
+    use chromiumoxide::handler::viewport::Viewport;
 
     let chrome = std::env::var("CHROME_PATH").unwrap_or_else(|_| {
         for p in ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome-stable"] {
@@ -79,6 +80,7 @@ async fn screenshot_dashboard(port: u16) -> anyhow::Result<Vec<u8>> {
     let config = BrowserConfig::builder()
         .chrome_executable(chrome)
         .window_size(800, 480)
+        .viewport(Viewport { width: 800, height: 480, device_scale_factor: Some(1.0), emulating_mobile: false, is_landscape: true, has_touch: false })
         .arg("--no-sandbox")
         .arg("--disable-gpu")
         .arg("--disable-dev-shm-usage")
