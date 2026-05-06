@@ -399,7 +399,7 @@ impl Sources {
         }
 
         // Keep top 5 by cap
-        cats.sort_by(|a, b| b.cap.cmp(&a.cap));
+        cats.sort_by_key(|c| std::cmp::Reverse(c.cap));
         cats.truncate(5);
 
         let months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
