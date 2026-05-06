@@ -39,6 +39,7 @@ struct AppState {
     sources: Arc<Sources>,
     port: u16,
     render_lock: Arc<tokio::sync::Mutex<()>>,
+    local_mode: bool,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -80,10 +81,12 @@ async fn screenshot_dashboard(port: u16) -> anyhow::Result<Vec<u8>> {
         "chromium".to_string()
     });
 
+    // Render at 2× DPR (1600×960 device pixels) then downscale to the device's
+    // native 800×480 — supersampling AA gives crisper text than rendering 1:1.
     let config = BrowserConfig::builder()
         .chrome_executable(chrome)
-        .window_size(800, 480)
-        .viewport(Viewport { width: 800, height: 480, device_scale_factor: Some(1.0), emulating_mobile: false, is_landscape: true, has_touch: false })
+        .window_size(1600, 960)
+        .viewport(Viewport { width: 800, height: 480, device_scale_factor: Some(2.0), emulating_mobile: false, is_landscape: true, has_touch: false })
         .arg("--no-sandbox")
         .arg("--disable-gpu")
         .arg("--disable-dev-shm-usage")
@@ -122,7 +125,144 @@ async fn screenshot_dashboard(port: u16) -> anyhow::Result<Vec<u8>> {
     browser.close().await?;
     let _ = handler_task.await;
 
-    Ok(png)
+    downscale_supersampled(&png)
+}
+
+/// Downscale the 2× supersampled screenshot to the panel's native 800×480
+/// and quantize to the 6-color e-ink palette with Floyd–Steinberg dithering,
+/// then encode as an indexed PNG with max zlib compression.
+///
+/// The panel can only render the colors in `PALETTE`, so any other pixel from
+/// the browser must be approximated. Doing the quantization here (instead of
+/// letting the device firmware do it) gives:
+///   - predictable on-panel output (we control the dither pattern)
+///   - tiny PNGs (1 byte per pixel + a 6-entry palette compresses very well)
+fn downscale_supersampled(input: &[u8]) -> anyhow::Result<Vec<u8>> {
+    use image::{imageops::FilterType, ImageReader};
+    use std::io::Cursor;
+
+    let img = ImageReader::with_format(Cursor::new(input), image::ImageFormat::Png)
+        .decode()?;
+    let (w, h) = (img.width(), img.height());
+    let small = img.resize_exact(w / 2, h / 2, FilterType::Lanczos3).to_rgb8();
+
+    let (indices, palette) = quantize_floyd_steinberg(&small);
+
+    // 6 colors fit in 4 bits — pack two indices per byte to halve raw size
+    // before zlib runs. PNG only supports power-of-two bit depths, so 4 is
+    // the smallest legal one for 6 entries.
+    let packed = pack_nibbles(&indices, small.width() as usize);
+
+    let mut out = Vec::with_capacity(48 * 1024);
+    {
+        let mut encoder = png::Encoder::new(&mut out, small.width(), small.height());
+        encoder.set_color(png::ColorType::Indexed);
+        encoder.set_depth(png::BitDepth::Four);
+        encoder.set_palette(palette);
+        encoder.set_compression(png::Compression::Best);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(&packed)?;
+    }
+    Ok(out)
+}
+
+/// Pack one nibble per pixel, two pixels per byte, with the high nibble first.
+/// Rows are padded to a whole byte (PNG requirement for sub-byte bit depths).
+fn pack_nibbles(indices: &[u8], width: usize) -> Vec<u8> {
+    let row_bytes = (width + 1) / 2;
+    let height = indices.len() / width;
+    let mut out = vec![0u8; row_bytes * height];
+    for y in 0..height {
+        for x in 0..width {
+            let v = indices[y * width + x] & 0x0f;
+            let dst = y * row_bytes + x / 2;
+            if x & 1 == 0 {
+                out[dst] |= v << 4;
+            } else {
+                out[dst] |= v;
+            }
+        }
+    }
+    out
+}
+
+/// 6-color palette matching the panel + the dashboard's accent colors.
+/// Order is fixed so palette indices stay stable across renders.
+const PALETTE: [[u8; 3]; 6] = [
+    [0x00, 0x00, 0x00], // BLACK
+    [0xff, 0xff, 0xff], // WHITE
+    [0xc1, 0x12, 0x1f], // RED   (matches dashboard accent)
+    [0xe5, 0xb8, 0x00], // YELLOW (matches dashboard warning)
+    [0x00, 0x80, 0x40], // GREEN
+    [0x10, 0x40, 0xa0], // BLUE
+];
+
+/// Quantize an RGB image to `PALETTE` with Floyd–Steinberg error diffusion.
+/// Returns (per-pixel palette indices, flattened RGB palette bytes).
+fn quantize_floyd_steinberg(img: &image::RgbImage) -> (Vec<u8>, Vec<u8>) {
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    // Working buffer in i16 so we can carry signed quantization error.
+    let mut buf: Vec<[i16; 3]> = img
+        .pixels()
+        .map(|p| [p[0] as i16, p[1] as i16, p[2] as i16])
+        .collect();
+
+    let mut indices = vec![0u8; w * h];
+
+    for y in 0..h {
+        // Serpentine scan: alternate row direction so the dither texture
+        // doesn't drift across the image.
+        let ltr = y & 1 == 0;
+        let xs: Box<dyn Iterator<Item = usize>> = if ltr {
+            Box::new(0..w)
+        } else {
+            Box::new((0..w).rev())
+        };
+        for x in xs {
+            let i = y * w + x;
+            let old = buf[i];
+            let (idx, chosen) = nearest_palette(old);
+            indices[i] = idx as u8;
+            let err = [old[0] - chosen[0] as i16, old[1] - chosen[1] as i16, old[2] - chosen[2] as i16];
+
+            // Floyd–Steinberg distribution (mirrored on right-to-left rows):
+            //         X    7
+            //    3    5    1     (/16)
+            let next_x: i32 = if ltr { 1 } else { -1 };
+            let push = |buf: &mut [[i16; 3]], xx: i32, yy: usize, num: i16| {
+                if xx < 0 || xx as usize >= w || yy >= h {
+                    return;
+                }
+                let j = yy * w + xx as usize;
+                for c in 0..3 {
+                    buf[j][c] = (buf[j][c] + err[c] * num / 16).clamp(0, 255);
+                }
+            };
+            push(&mut buf, x as i32 + next_x,     y,     7);
+            push(&mut buf, x as i32 - next_x, y + 1,     3);
+            push(&mut buf, x as i32,          y + 1,     5);
+            push(&mut buf, x as i32 + next_x, y + 1,     1);
+        }
+    }
+
+    let palette_bytes = PALETTE.iter().flatten().copied().collect();
+    (indices, palette_bytes)
+}
+
+fn nearest_palette(px: [i16; 3]) -> (usize, [u8; 3]) {
+    let mut best = 0usize;
+    let mut best_d = i32::MAX;
+    for (i, c) in PALETTE.iter().enumerate() {
+        let dr = px[0] as i32 - c[0] as i32;
+        let dg = px[1] as i32 - c[1] as i32;
+        let db = px[2] as i32 - c[2] as i32;
+        let d = dr * dr + dg * dg + db * db;
+        if d < best_d {
+            best_d = d;
+            best = i;
+        }
+    }
+    (best, PALETTE[best])
 }
 
 async fn regenerate(state: &AppState) {
@@ -132,7 +272,11 @@ async fn regenerate(state: &AppState) {
     };
 
     let mock = DashData::mock();
-    *state.data.write().await = state.sources.fetch(&mock).await;
+    *state.data.write().await = if state.local_mode {
+        mock
+    } else {
+        state.sources.fetch(&mock).await
+    };
 
     match screenshot_dashboard(state.port).await {
         Ok(png) => {
@@ -240,9 +384,21 @@ async fn main() {
         )
         .init();
 
-    let addr = std::env::var("LISTEN").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+    // RENDER_TO=path.png → render a single PNG with mock data, write it, exit.
+    // LOCAL_MODE=1       → serve normally but never fetch real data (mock only).
+    let render_to = std::env::var("RENDER_TO").ok();
+    let local_mode = render_to.is_some() || std::env::var("LOCAL_MODE").is_ok();
+
+    // In RENDER_TO mode, bind to localhost on a random port — we just need
+    // Chrome to be able to reach the page; nothing external should hit it.
+    let addr = if render_to.is_some() {
+        "127.0.0.1:0".to_string()
+    } else {
+        std::env::var("LISTEN").unwrap_or_else(|_| "0.0.0.0:8080".to_string())
+    };
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind failed");
-    let port = listener.local_addr().unwrap().port();
+    let bound = listener.local_addr().unwrap();
+    let port = bound.port();
 
     let state = AppState {
         png_cache:    Arc::new(RwLock::new(Vec::new())),
@@ -251,7 +407,39 @@ async fn main() {
         sources:      Arc::new(Sources::from_env()),
         port,
         render_lock:  Arc::new(tokio::sync::Mutex::new(())),
+        local_mode,
     };
+
+    let app = Router::new()
+        .route("/api/setup",      get(api_setup))
+        .route("/api/display",    get(api_display))
+        .route("/api/log",        post(api_log))
+        .route("/api/data",       get(api_data))
+        .route("/dashboard.html", get(serve_dashboard_html))
+        .route("/dashboard.png",  get(serve_png))
+        .route("/refresh",        get(force_refresh))
+        .route("/health",         get(health))
+        .with_state(state.clone());
+
+    if let Some(path) = render_to {
+        // Run the server just long enough for a single in-process screenshot.
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        // Yield so the listener is actively accepting before Chrome connects.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        info!("rendering one frame to {path} (mock data, port {port})");
+        regenerate(&state).await;
+        let bytes = state.png_cache.read().await.clone();
+        if bytes.is_empty() {
+            eprintln!("render produced no bytes — see warnings above");
+            std::process::exit(1);
+        }
+        std::fs::write(&path, &bytes).expect("write png");
+        info!("wrote {} bytes to {path}", bytes.len());
+        server.abort();
+        return;
+    }
 
     // Background render loop — first render fires after server is ready.
     let bg = state.clone();
@@ -264,19 +452,8 @@ async fn main() {
         }
     });
 
-    let app = Router::new()
-        .route("/api/setup",      get(api_setup))
-        .route("/api/display",    get(api_display))
-        .route("/api/log",        post(api_log))
-        .route("/api/data",       get(api_data))
-        .route("/dashboard.html", get(serve_dashboard_html))
-        .route("/dashboard.png",  get(serve_png))
-        .route("/refresh",        get(force_refresh))
-        .route("/health",         get(health))
-        .with_state(state);
-
-    info!("Listening on http://{addr}");
-    info!("Preview  →  http://{addr}/dashboard.html");
-    info!("Image    →  http://{addr}/dashboard.png");
+    info!("Listening on http://{bound}{}", if local_mode { " (LOCAL_MODE: mock data only)" } else { "" });
+    info!("Preview  →  http://{bound}/dashboard.html");
+    info!("Image    →  http://{bound}/dashboard.png");
     axum::serve(listener, app).await.expect("server error");
 }

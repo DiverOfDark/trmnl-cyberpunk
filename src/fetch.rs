@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use chrono::{Datelike, Local, Weekday};
+use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Utc, Weekday};
 use reqwest::Client;
 use serde_json::Value;
 use tracing::warn;
@@ -17,9 +17,7 @@ pub struct Sources {
     pub alertmanager: String,
     pub actualbudget_url: String,
     pub actualbudget_key: String,
-    pub nextcloud_url: String,
-    pub nextcloud_user: String,
-    pub nextcloud_pass: String,
+    pub ics_urls: Vec<String>,
     pub weather_lat: f64,
     pub weather_lon: f64,
     pub weather_tz: String,
@@ -42,11 +40,12 @@ impl Sources {
                 "http://actualbudget-api.actualbudget.svc.cluster.local".into()
             }),
             actualbudget_key: std::env::var("ACTUALBUDGET_KEY").unwrap_or_default(),
-            nextcloud_url: std::env::var("NEXTCLOUD_URL").unwrap_or_else(|_| {
-                "http://nextcloud.nextcloud.svc.cluster.local".into()
-            }),
-            nextcloud_user: std::env::var("NEXTCLOUD_USER").unwrap_or_default(),
-            nextcloud_pass: std::env::var("NEXTCLOUD_PASS").unwrap_or_default(),
+            ics_urls: std::env::var("ICS_URLS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
             weather_lat: std::env::var("WEATHER_LAT")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -410,75 +409,73 @@ impl Sources {
     }
 }
 
-// ── Nextcloud CalDAV ──────────────────────────────────────────────────────
+// ── ICS calendar feeds ────────────────────────────────────────────────────
 
 impl Sources {
     async fn agenda(&self) -> Result<Vec<AgendaItem>> {
-        if self.nextcloud_user.is_empty() || self.nextcloud_pass.is_empty() {
-            return Err(anyhow!("NEXTCLOUD_USER / NEXTCLOUD_PASS not set"));
+        if self.ics_urls.is_empty() {
+            return Err(anyhow!("ICS_URLS not configured"));
         }
 
-        let now = Local::now();
-        let today_start = format!("{}T000000Z", now.format("%Y%m%d"));
-        let today_end   = format!("{}T235959Z", now.format("%Y%m%d"));
+        let today = Local::now().date_naive();
+        let fetches = self.ics_urls.iter().map(|url| {
+            let client = self.client.clone();
+            let url = url.clone();
+            async move {
+                let body = client.get(&url).send().await?.text().await?;
+                Ok::<_, reqwest::Error>(body)
+            }
+        });
+        let results = futures::future::join_all(fetches).await;
 
-        let caldav_url = format!(
-            "{}/remote.php/dav/calendars/{}/personal/",
-            self.nextcloud_url.trim_end_matches('/'),
-            self.nextcloud_user,
-        );
+        let mut items = Vec::new();
+        for (url, r) in self.ics_urls.iter().zip(results) {
+            match r {
+                Ok(body) => items.extend(parse_ical_events(&body, today)),
+                Err(e) => warn!("ics fetch failed for {url}: {e}"),
+            }
+        }
 
-        let xml_body = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
-  <d:prop>
-    <c:calendar-data/>
-  </d:prop>
-  <c:filter>
-    <c:comp-filter name="VCALENDAR">
-      <c:comp-filter name="VEVENT">
-        <c:time-range start="{}" end="{}"/>
-      </c:comp-filter>
-    </c:comp-filter>
-  </c:filter>
-</c:calendar-query>"#,
-            today_start, today_end
-        );
+        // De-dup by (time, title) — a calendar invited to multiple feeds duplicates.
+        items.sort_by(|a, b| a.time.cmp(&b.time).then(a.title.cmp(&b.title)));
+        items.dedup_by(|a, b| a.time == b.time && a.title == b.title);
+        items.truncate(6);
 
-        let resp_text = self.client
-            .request(reqwest::Method::from_bytes(b"REPORT").unwrap(), &caldav_url)
-            .basic_auth(&self.nextcloud_user, Some(&self.nextcloud_pass))
-            .header("Depth", "1")
-            .header("Content-Type", "application/xml; charset=utf-8")
-            .body(xml_body)
-            .send()
-            .await?
-            .text()
-            .await?;
-
-        let items = parse_ical_events(&resp_text);
+        if items.is_empty() {
+            return Err(anyhow!("no events for today across {} feeds", self.ics_urls.len()));
+        }
         Ok(items)
     }
 }
 
-fn parse_ical_events(xml: &str) -> Vec<AgendaItem> {
+fn parse_ical_events(content: &str, today: NaiveDate) -> Vec<AgendaItem> {
+    let unfolded = unfold(content);
     let mut items = Vec::new();
 
-    for vevent_block in xml.split("BEGIN:VEVENT") {
+    for vevent_block in unfolded.split("BEGIN:VEVENT") {
         if !vevent_block.contains("END:VEVENT") {
             continue;
         }
         let block = &vevent_block[..vevent_block.find("END:VEVENT").unwrap_or(vevent_block.len())];
 
-        let summary   = ical_field(block, "SUMMARY").unwrap_or_default();
-        let categories = ical_field_prefix(block, "CATEGORIES").unwrap_or_default();
-        let dtstart   = ical_field_prefix(block, "DTSTART").unwrap_or_default();
+        let summary    = ical_field(block, "SUMMARY").unwrap_or_default();
+        let categories = ical_field_value(block, "CATEGORIES").unwrap_or_default();
+        let Some((tzid, dtstart)) = ical_dtstart(block) else { continue };
 
-        // Extract HH:MM from DTSTART value (handles TZID= and UTC Z forms)
-        let time = parse_ical_time(&dtstart);
-        if time.is_empty() || summary.is_empty() {
+        if summary.is_empty() || dtstart.is_empty() {
             continue;
         }
+
+        let Some((start_local, all_day)) = parse_ical_dtstart(&dtstart, tzid.as_deref()) else { continue };
+        if start_local.date_naive() != today {
+            continue;
+        }
+
+        let time = if all_day {
+            "ALL".to_string()
+        } else {
+            start_local.format("%H:%M").to_string()
+        };
 
         let tag = if !categories.is_empty() {
             categories.split(',').next().unwrap_or("").trim()
@@ -490,61 +487,109 @@ fn parse_ical_events(xml: &str) -> Vec<AgendaItem> {
         items.push(AgendaItem { time, title: summary, tag });
     }
 
-    // Sort by time
-    items.sort_by(|a, b| a.time.cmp(&b.time));
-    items.truncate(6);
     items
 }
 
-fn ical_field<'a>(block: &'a str, key: &str) -> Option<String> {
+fn ical_field(block: &str, key: &str) -> Option<String> {
     // Exact key match: "KEY:value"
     let prefix = format!("{}:", key);
     for line in block.lines() {
-        let line = line.trim_start(); // handle folded lines
         if line.starts_with(&prefix) {
-            return Some(unfold(line[prefix.len()..].to_string()));
+            return Some(line[prefix.len()..].to_string());
         }
     }
     None
 }
 
-fn ical_field_prefix<'a>(block: &'a str, key: &str) -> Option<String> {
-    // Matches "KEY:value" OR "KEY;param=...:value"
-    let exact   = format!("{}:", key);
+fn ical_field_value(block: &str, key: &str) -> Option<String> {
+    // Matches "KEY:value" OR "KEY;param=...:value", returns the value only.
+    let exact    = format!("{}:", key);
     let prefixed = format!("{};", key);
     for line in block.lines() {
-        let line = line.trim_start();
         if line.starts_with(&exact) {
-            return Some(unfold(line[exact.len()..].to_string()));
+            return Some(line[exact.len()..].to_string());
         }
         if line.starts_with(&prefixed) {
             if let Some(pos) = line.find(':') {
-                return Some(unfold(line[pos + 1..].to_string()));
+                return Some(line[pos + 1..].to_string());
             }
         }
     }
     None
 }
 
-fn unfold(s: String) -> String {
-    // iCal line folding: CRLF + SPACE/TAB continues the value
-    s.replace("\r\n ", "").replace("\n ", "").replace("\r\n\t", "").replace("\n\t", "")
+fn unfold(s: &str) -> String {
+    // RFC 5545: a CRLF (or LF) followed by a single SPACE or TAB continues the
+    // previous line — the join character is removed, *not* preserved.
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\n' {
+            if matches!(chars.peek(), Some(' ') | Some('\t')) {
+                chars.next();
+                continue;
+            }
+            out.push('\n');
+        } else if c == '\r' {
+            // Skip lone CR; the LF will trigger the fold check above.
+            continue;
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
-fn parse_ical_time(dtstart: &str) -> String {
-    // Handles: 20260506T153000Z  or  20260506T153000  (local)
-    if dtstart.len() < 15 {
-        return String::new();
+/// Locate the DTSTART line in a VEVENT block and return (TZID, value).
+fn ical_dtstart(block: &str) -> Option<(Option<String>, String)> {
+    for line in block.lines() {
+        if let Some(rest) = line.strip_prefix("DTSTART:") {
+            return Some((None, rest.to_string()));
+        }
+        if let Some(rest) = line.strip_prefix("DTSTART;") {
+            let colon = rest.find(':')?;
+            let params = &rest[..colon];
+            let value  = &rest[colon + 1..];
+            let tzid = params.split(';').find_map(|p| {
+                p.strip_prefix("TZID=").map(|v| v.trim_matches('"').to_string())
+            });
+            return Some((tzid, value.to_string()));
+        }
     }
-    let t_pos = dtstart.find('T').unwrap_or(0);
-    if t_pos == 0 {
-        return String::new();
+    None
+}
+
+fn parse_ical_dtstart(value: &str, tzid: Option<&str>) -> Option<(chrono::DateTime<Local>, bool)> {
+    // Accepts:
+    //   20260507T153000Z   → UTC datetime
+    //   20260507T153000    → floating / TZID-relative datetime
+    //   20260507           → all-day (VALUE=DATE)
+    let v = value.trim();
+    if v.contains('T') {
+        let is_utc = v.ends_with('Z');
+        let core = v.trim_end_matches('Z');
+        let naive = NaiveDateTime::parse_from_str(core, "%Y%m%dT%H%M%S").ok()?;
+        let local = if is_utc {
+            Utc.from_utc_datetime(&naive).with_timezone(&Local)
+        } else if let Some(tz_str) = tzid {
+            match tz_str.parse::<chrono_tz::Tz>() {
+                Ok(tz) => tz.from_local_datetime(&naive).single()?.with_timezone(&Local),
+                Err(_) => {
+                    // Unknown / Outlook-shaped TZID (e.g. "Pacific Standard Time"):
+                    // treat as floating local rather than dropping the event.
+                    warn!("unknown TZID '{tz_str}', treating as local");
+                    Local.from_local_datetime(&naive).single()?
+                }
+            }
+        } else {
+            Local.from_local_datetime(&naive).single()?
+        };
+        Some((local, false))
+    } else {
+        let date = NaiveDate::parse_from_str(v, "%Y%m%d").ok()?;
+        let dt = date.and_hms_opt(0, 0, 0)?;
+        Some((Local.from_local_datetime(&dt).single()?, true))
     }
-    let time_part = &dtstart[t_pos + 1..];
-    if time_part.len() < 4 {
-        return String::new();
-    }
-    format!("{}:{}", &time_part[..2], &time_part[2..4])
 }
 
 // ── urlencoding helper ────────────────────────────────────────────────────

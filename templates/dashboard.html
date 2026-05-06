@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700;800&family=Noto+Sans+JP:wght@500;700;900&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700;800&display=swap" rel="stylesheet">
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body {
@@ -36,7 +36,6 @@ html, body {
 }
 .hdr-left .unit  { font-size: 10px; letter-spacing: 2px; opacity: .7; }
 .hdr-left .name  { font-size: 22px; font-weight: 800; letter-spacing: -.5px; }
-.hdr-left .jp    { font-family: 'Noto Sans JP', system-ui; font-size: 12px; color: #c1121f; }
 .hdr-center {
   display: flex; align-items: center; justify-content: center;
   font-size: 13px; font-weight: 700; letter-spacing: 4px;
@@ -71,10 +70,9 @@ html, body {
 }
 .sh .en {
   background: #000; color: #fff;
-  padding: 1px 5px; font-size: 9px; letter-spacing: 1px; font-weight: 700;
+  padding: 1px 5px; font-size: 11px; letter-spacing: 1px; font-weight: 700;
 }
-.sh .jp { font-family: 'Noto Sans JP', system-ui; font-size: 11px; font-weight: 700; color: #c1121f; }
-.sh .seq { margin-left: auto; font-size: 9px; opacity: .6; }
+.sh .seq { margin-left: auto; font-size: 11px; opacity: .6; }
 
 /* ── Panels ── */
 .p-wx     { grid-row: span 2; border-right: 2px solid #000; padding: 10px 12px; display: flex; flex-direction: column; }
@@ -89,7 +87,7 @@ html, body {
 .wx-temp .deg { color: #c1121f; }
 .wx-side { margin-top: 6px; }
 .wx-cond { font-size: 11px; font-weight: 700; letter-spacing: 1px; }
-.wx-hl   { font-size: 9px; }
+.wx-hl   { font-size: 11px; }
 .forecast {
   margin-top: auto;
   display: grid; grid-template-columns: repeat(4, 1fr);
@@ -97,9 +95,9 @@ html, body {
 }
 .fc { padding: 4px 4px 6px; text-align: center; border-right: 1px dashed #000; }
 .fc:last-child { border-right: none; }
-.fc-d  { font-size: 9px; letter-spacing: 1px; font-weight: 700; }
+.fc-d  { font-size: 11px; letter-spacing: 1px; font-weight: 700; }
 .fc-hi { font-size: 18px; font-weight: 800; line-height: 1; }
-.fc-lo { font-size: 8px; opacity: .6; }
+.fc-lo { font-size: 10px; opacity: .7; }
 
 /* ── Agenda ── */
 .ev {
@@ -111,26 +109,26 @@ html, body {
 .ev-t { font-size: 14px; font-weight: 800; font-feature-settings: 'tnum'; }
 .ev-t.first { color: #c1121f; }
 .ev-title { font-size: 11px; font-weight: 600; }
-.ev-tag { font-size: 8px; font-weight: 700; letter-spacing: 1px; text-align: center; background: #000; color: #fff; padding: 1px 0; }
+.ev-tag { font-size: 10px; font-weight: 700; letter-spacing: 1px; text-align: center; background: #000; color: #fff; padding: 1px 0; }
 
 /* ── SYS metrics ── */
 .sys-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 .box { border: 1px solid #000; padding: 4px 6px; }
-.box-lbl { font-size: 8px; letter-spacing: 1px; font-weight: 700; }
+.box-lbl { font-size: 10px; letter-spacing: 1px; font-weight: 700; }
 .box-val { font-size: 22px; font-weight: 800; line-height: 1; }
 .box-val .u { font-size: 11px; color: #c1121f; }
 .box-bar { height: 4px; background: #eee; border: 1px solid #000; margin-top: 2px; }
 .box-bar-fill { height: 100%; background: #000; }
 .box-bar-fill.hot { background: #c1121f; }
-.sys-meta { margin-top: 6px; font-size: 9px; display: flex; justify-content: space-between; }
+.sys-meta { margin-top: 6px; font-size: 11px; display: flex; justify-content: space-between; }
 
 /* ── Budget ── */
 .bgt-total { font-size: 26px; font-weight: 800; line-height: 1; }
-.bgt-sub   { font-size: 9px; opacity: .7; }
+.bgt-sub   { font-size: 11px; opacity: .7; }
 .bgt-bar   { height: 8px; border: 1px solid #000; margin: 4px 0 6px; position: relative; }
 .bgt-bar-fill { height: 100%; background: #c1121f; }
 .bgt-cats {
-  font-size: 8px;
+  font-size: 10px;
   display: grid; grid-template-columns: auto 1fr auto;
   row-gap: 2px; column-gap: 4px;
 }
@@ -141,14 +139,14 @@ html, body {
 .bgt-v { font-feature-settings: 'tnum'; }
 
 /* ── OPS tasks ── */
-.task { display: grid; grid-template-columns: 12px 22px 1fr; column-gap: 3px; padding: 1px 0; font-size: 9px; }
+.task { display: grid; grid-template-columns: 14px 26px 1fr; column-gap: 3px; padding: 1px 0; font-size: 11px; }
 .task-p { font-weight: 700; }
 .task-p.hi { color: #c1121f; }
 .task-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-t.done { text-decoration: line-through; }
 
 /* ── Alerts ── */
-.alts { border-top: 1px dashed #000; padding-top: 3px; font-size: 8px; }
+.alts { border-top: 1px dashed #000; padding-top: 3px; font-size: 10px; }
 .alt  { display: grid; grid-template-columns: 30px 1fr; column-gap: 4px; margin-bottom: 2px; }
 .alt-l { text-align: center; font-weight: 700; padding: 0 2px; color: #fff; }
 .alt-l.err { background: #c1121f; }
@@ -161,10 +159,10 @@ html, body {
   position: absolute; bottom: 0; left: 0; right: 0; height: 22px;
   background: #000; color: #fff;
   display: flex; align-items: center; gap: 12px; padding: 0 10px;
-  font-size: 9px; letter-spacing: 2px; font-weight: 700;
+  font-size: 11px; letter-spacing: 2px; font-weight: 700;
 }
 .footer .online { color: #c1121f; }
-.footer .jp { margin-left: auto; font-family: 'Noto Sans JP', system-ui; }
+.footer .brand { margin-left: auto; }
 </style>
 </head>
 <body>
@@ -180,7 +178,6 @@ html, body {
   <div class="hdr-left">
     <span class="unit">UNIT</span>
     <span class="name">TRMNL-01</span>
-    <span class="jp">端末</span>
   </div>
   <div class="hdr-center" id="hdr-motto">STAY PARANOID. STAY ONLINE.</div>
   <div class="hdr-right">
@@ -197,7 +194,7 @@ html, body {
 
   <!-- COL 1 rows 1+2: Weather -->
   <div class="p-wx">
-    <div class="sh"><span class="en">WX</span><span class="jp">天気</span><span class="seq">// 01</span></div>
+    <div class="sh"><span class="en">WX</span><span class="seq">// 01</span></div>
     <div class="wx-row">
       <div class="wx-temp"><span id="wx-temp">14</span><span class="deg">°</span></div>
       <div class="wx-side">
@@ -210,20 +207,20 @@ html, body {
 
   <!-- COL 2 row 1: Agenda -->
   <div class="p-agenda">
-    <div class="sh"><span class="en">AGENDA</span><span class="jp">予定</span><span class="seq">// 02</span></div>
+    <div class="sh"><span class="en">AGENDA</span><span class="seq">// 02</span></div>
     <div id="agenda"></div>
   </div>
 
   <!-- COL 2 row 2: SYS -->
   <div class="p-sys">
-    <div class="sh"><span class="en">SYS</span><span class="jp">状態</span><span class="seq">// 03</span></div>
+    <div class="sh"><span class="en">SYS</span><span class="seq">// 03</span></div>
     <div class="sys-grid" id="sys-grid"></div>
     <div class="sys-meta" id="sys-meta"></div>
   </div>
 
   <!-- COL 3 row 1: Budget -->
   <div class="p-budget">
-    <div class="sh"><span class="en">$</span><span class="jp">予算</span><span class="seq">// 04</span></div>
+    <div class="sh"><span class="en">$</span><span class="seq">// 04</span></div>
     <div class="bgt-total">$<span id="bgt-spent">--</span></div>
     <div class="bgt-sub">/ $<span id="bgt-cap">--</span> · <span id="bgt-mo">---</span></div>
     <div class="bgt-bar"><div class="bgt-bar-fill" id="bgt-bar" style="width:0%"></div></div>
@@ -232,7 +229,7 @@ html, body {
 
   <!-- COL 3 row 2: OPS (tasks + alerts) -->
   <div class="p-ops">
-    <div class="sh"><span class="en">OPS</span><span class="jp">作業</span><span class="seq">// 05</span></div>
+    <div class="sh"><span class="en">OPS</span><span class="seq">// 05</span></div>
     <div style="flex:1;overflow:hidden" id="tasks"></div>
     <div class="alts" id="alerts"></div>
   </div>
@@ -243,7 +240,7 @@ html, body {
 <div class="footer">
   <span>SYNC <span id="ft-last">--:--</span>→<span id="ft-next">--:--</span></span>
   <span class="online">● ONLINE</span>
-  <span class="jp">東京 ・ neo / TRMNL</span>
+  <span class="brand">NEO / TRMNL</span>
 </div>
 
 <script>
