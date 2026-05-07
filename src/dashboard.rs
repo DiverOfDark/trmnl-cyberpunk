@@ -293,10 +293,10 @@ fn draw_body(c: &mut Canvas, data: &DashData) {
     c.hline(col3_x, BODY_TOP + ROW_H as i32,     COL3_W, C::Black);
     c.hline(col3_x, BODY_TOP + ROW_H as i32 + 1, COL3_W, C::Black);
 
-    draw_weather(c, &data.weather);
+    draw_weather(c, data.weather.as_ref());
     draw_agenda(c, &data.agenda);
     draw_sys(c, &data.hosts);
-    draw_budget(c, &data.budget);
+    draw_budget(c, data.budget.as_ref());
     draw_ops(c, &data.tasks, &data.alerts);
 }
 
@@ -344,9 +344,17 @@ fn draw_section_header(c: &mut Canvas, panel: Rect, en: &str, seq: &str) -> i32 
 
 // ── Weather panel ──────────────────────────────────────────────────────────
 
-fn draw_weather(c: &mut Canvas, w: &WeatherData) {
+fn draw_weather(c: &mut Canvas, w: Option<&WeatherData>) {
     let panel = col1_rect();
     let content_y = draw_section_header(c, panel, "WX", "// 01");
+
+    let Some(w) = w else {
+        // Not configured — show a placeholder so the panel doesn't read as
+        // "0°" mock data.
+        draw_text(c, &f_lg_bold(), "—", panel.x + 12, content_y + 32, C::Black, Align::Left);
+        draw_text(c, &f_small(), "WEATHER NOT SET", panel.x + 12, content_y + 50, C::Black, Align::Left);
+        return;
+    };
 
     // Big temperature.
     let temp_str = format!("{}", w.temp_c);
@@ -434,6 +442,10 @@ fn draw_agenda(c: &mut Canvas, items: &[AgendaItem]) {
     let content_y = draw_section_header(c, panel, "AGENDA", "// 02");
 
     let pad_x = 12;
+    if items.is_empty() {
+        draw_text(c, &f_small(), "NO EVENTS TODAY", panel.x + pad_x, content_y + 18, C::Black, Align::Left);
+        return;
+    }
     let row_h = 32i32;
     for (i, ev) in items.iter().take(4).enumerate() {
         let y = content_y + (i as i32) * row_h;
@@ -472,10 +484,10 @@ fn draw_sys(c: &mut Canvas, hosts: &[HostData]) {
     let panel = col2_bot();
     let content_y = draw_section_header(c, panel, "SYS", "// 03");
 
-    let host = hosts.first().cloned().unwrap_or(HostData {
-        name: "??".into(), cpu: 0, cpu_temp: 0, ram_pct: 0, disk_pct: 0,
-        uptime_days: 0, load: [0.0, 0.0, 0.0],
-    });
+    let Some(host) = hosts.first().cloned() else {
+        draw_text(c, &f_small(), "PROMETHEUS_URL NOT SET", panel.x + 12, content_y + 18, C::Black, Align::Left);
+        return;
+    };
 
     let pad_x = 12;
     let metrics: [(&str, u32, &str); 4] = [
@@ -522,9 +534,15 @@ fn draw_sys(c: &mut Canvas, hosts: &[HostData]) {
 
 // ── Budget panel ───────────────────────────────────────────────────────────
 
-fn draw_budget(c: &mut Canvas, b: &BudgetData) {
+fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
     let panel = col3_top();
     let content_y = draw_section_header(c, panel, "$", "// 04");
+
+    let Some(b) = b else {
+        draw_text(c, &f_lg_bold(), "—", panel.x + 10, content_y + 24, C::Black, Align::Left);
+        draw_text(c, &f_small(), "BUDGET NOT SET", panel.x + 10, content_y + 44, C::Black, Align::Left);
+        return;
+    };
 
     let pad_x = 10;
     // Hero total

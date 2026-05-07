@@ -20,7 +20,7 @@ pub struct WeatherDay {
     pub cond: String,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Default, Serialize)]
 pub struct WeatherData {
     pub temp_c: i8,
     pub condition: String,
@@ -74,10 +74,14 @@ pub struct DashData {
     pub last_sync: String,
     pub next_sync: String,
     pub hosts: Vec<HostData>,
-    pub weather: WeatherData,
+    /// `None` when the integration isn't configured (env vars empty);
+    /// renderer skips the WX panel body in that case. `Some` when fetched
+    /// successfully OR when configured-but-failed (mock fallback).
+    pub weather: Option<WeatherData>,
     pub agenda: Vec<AgendaItem>,
     pub tasks: Vec<Task>,
-    pub budget: BudgetData,
+    /// Same not-configured-vs-mocked-fallback semantics as `weather`.
+    pub budget: Option<BudgetData>,
     pub alerts: Vec<Alert>,
 }
 
@@ -127,7 +131,7 @@ impl DashData {
                     load: [0.24, 0.18, 0.21],
                 },
             ],
-            weather: WeatherData {
+            weather: Some(WeatherData {
                 temp_c: 14,
                 condition: "RAIN".into(),
                 hi: 17, lo: 9,
@@ -137,7 +141,7 @@ impl DashData {
                     WeatherDay { day: "SAT".into(), hi: 19, lo: 12, cond: "RAIN".into()  },
                     WeatherDay { day: "SUN".into(), hi: 16, lo:  9, cond: "STORM".into() },
                 ],
-            },
+            }),
             agenda: vec![
                 AgendaItem { time: "15:30".into(), title: "Standup // k3s infra".into(), tag: "WORK".into() },
                 AgendaItem { time: "17:00".into(), title: "Replace UPS battery".into(),  tag: "LAB".into()  },
@@ -150,7 +154,7 @@ impl DashData {
                 Task { text: "Backup nextcloud → rclone/B2".into(),    done: false, priority: "HI".into()  },
                 Task { text: "Rotate vaultwarden secrets".into(),       done: false, priority: "LOW".into() },
             ],
-            budget: BudgetData {
+            budget: Some(BudgetData {
                 month_label: format!("{} '{}", month, &now.format("%Y").to_string()[2..]),
                 spent: 1842,
                 cap: 2600,
@@ -161,7 +165,7 @@ impl DashData {
                     BudgetCat { label: "TRANS".into(), spent:  94, cap: 200  },
                     BudgetCat { label: "MISC".into(),  spent: 269, cap: 670  },
                 ],
-            },
+            }),
             alerts: vec![
                 Alert { level: "WRN".into(), time: "14:02".into(), message: "muspelheimr cpu_temp 71C > 65".into() },
                 Alert { level: "ERR".into(), time: "13:48".into(), message: "velero backup.daily failed rc=2".into() },

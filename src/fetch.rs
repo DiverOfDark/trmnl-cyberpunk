@@ -11,6 +11,25 @@ use crate::data::*;
 
 // ── Sources config ─────────────────────────────────────────────────────────
 
+/// Sentinel error returned when an integration's required env var is empty
+/// or unset. The parent `fetch()` distinguishes this from a real fetch
+/// failure: unconfigured → empty data (don't fake it), failed → mock
+/// fallback (so a transient outage doesn't blank the dashboard).
+#[derive(Debug, Clone, Copy)]
+pub struct NotConfigured(pub &'static str);
+
+impl std::fmt::Display for NotConfigured {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} not configured", self.0)
+    }
+}
+
+impl std::error::Error for NotConfigured {}
+
+fn is_not_configured(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<NotConfigured>().is_some()
+}
+
 pub struct Sources {
     client: Client,
     pub prometheus: String,
@@ -37,15 +56,13 @@ impl Sources {
                 .user_agent("Mozilla/5.0 (compatible; trmnl-cyberpunk/0.1; +https://github.com/DiverOfDark/trmnl-cyberpunk)")
                 .build()
                 .unwrap(),
-            prometheus: std::env::var("PROMETHEUS_URL").unwrap_or_else(|_| {
-                "http://prometheus-operated.prometheus.svc.cluster.local:9090".into()
-            }),
-            alertmanager: std::env::var("ALERTMANAGER_URL").unwrap_or_else(|_| {
-                "http://alertmanager-operated.prometheus.svc.cluster.local:9093".into()
-            }),
-            actualbudget_url: std::env::var("ACTUALBUDGET_URL").unwrap_or_else(|_| {
-                "http://actualbudget-api.actualbudget.svc.cluster.local".into()
-            }),
+            // All URL fields default to empty; the helm chart and
+            // docker-compose pass "" for unset values. An empty URL means
+            // the integration is opted-out and the fetch fn returns
+            // `NotConfigured` instead of attempting a request.
+            prometheus:       std::env::var("PROMETHEUS_URL").unwrap_or_default(),
+            alertmanager:     std::env::var("ALERTMANAGER_URL").unwrap_or_default(),
+            actualbudget_url: std::env::var("ACTUALBUDGET_URL").unwrap_or_default(),
             actualbudget_key: std::env::var("ACTUALBUDGET_KEY").unwrap_or_default(),
             actualbudget_sync_id: std::env::var("ACTUALBUDGET_SYNC_ID").unwrap_or_default(),
             actualbudget_password: std::env::var("ACTUALBUDGET_PASSWORD").unwrap_or_default(),
@@ -78,26 +95,40 @@ impl Sources {
             self.agenda(),
         );
 
-        let hosts = hosts_r.unwrap_or_else(|e| {
-            warn!("hosts fetch failed: {e}");
-            mock.hosts.clone()
-        });
-        let weather = weather_r.unwrap_or_else(|e| {
-            warn!("weather fetch failed: {e}");
-            mock.weather.clone()
-        });
-        let alerts = alerts_r.unwrap_or_else(|e| {
-            warn!("alerts fetch failed: {e}");
-            mock.alerts.clone()
-        });
-        let budget = budget_r.unwrap_or_else(|e| {
-            warn!("budget fetch failed: {e}");
-            mock.budget.clone()
-        });
-        let agenda = agenda_r.unwrap_or_else(|e| {
-            warn!("agenda fetch failed: {e}");
-            mock.agenda.clone()
-        });
+        // Per-section dispatch:
+        //   Ok(data)              → use real data
+        //   Err(NotConfigured)    → integration opted out; show empty/None
+        //                            instead of mock so the dashboard stays
+        //                            honest about what isn't wired up
+        //   Err(other)            → integration is configured but the
+        //                            request failed; mock fallback so a
+        //                            transient outage doesn't blank the
+        //                            panel (and we log the actual error)
+        let hosts = match hosts_r {
+            Ok(h) => h,
+            Err(e) if is_not_configured(&e) => Vec::new(),
+            Err(e) => { warn!("hosts fetch failed: {e:#}"); mock.hosts.clone() }
+        };
+        let weather = match weather_r {
+            Ok(w) => Some(w),
+            Err(e) if is_not_configured(&e) => None,
+            Err(e) => { warn!("weather fetch failed: {e:#}"); Some(mock.weather.clone().unwrap_or_default()) }
+        };
+        let alerts = match alerts_r {
+            Ok(a) => a,
+            Err(e) if is_not_configured(&e) => Vec::new(),
+            Err(e) => { warn!("alerts fetch failed: {e:#}"); mock.alerts.clone() }
+        };
+        let budget = match budget_r {
+            Ok(b) => Some(b),
+            Err(e) if is_not_configured(&e) => None,
+            Err(e) => { warn!("budget fetch failed: {e:#}"); mock.budget.clone() }
+        };
+        let agenda = match agenda_r {
+            Ok(a) => a,
+            Err(e) if is_not_configured(&e) => Vec::new(),
+            Err(e) => { warn!("agenda fetch failed: {e:#}"); mock.agenda.clone() }
+        };
 
         let now = Local::now();
         let months = [
@@ -170,6 +201,9 @@ fn to_map(pairs: Vec<(String, f64)>) -> HashMap<String, f64> {
 
 impl Sources {
     async fn hosts(&self) -> Result<Vec<HostData>> {
+        if self.prometheus.is_empty() {
+            return Err(NotConfigured("PROMETHEUS_URL").into());
+        }
         let (cpu_r, temp_r, ram_r, disk_r, uptime_r, l1_r, l5_r, l15_r) = tokio::join!(
             prom_query(&self.client, &self.prometheus,
                 r#"100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)"#),
@@ -314,6 +348,9 @@ impl Sources {
 
 impl Sources {
     async fn alerts(&self) -> Result<Vec<Alert>> {
+        if self.alertmanager.is_empty() {
+            return Err(NotConfigured("ALERTMANAGER_URL").into());
+        }
         let url = format!("{}/api/v2/alerts?silenced=false&inhibited=false", self.alertmanager);
         let resp: Value = self.client.get(&url).send().await?.json().await?;
 
@@ -398,11 +435,14 @@ async fn get_json(
 
 impl Sources {
     async fn budget(&self) -> Result<BudgetData> {
+        if self.actualbudget_url.is_empty() {
+            return Err(NotConfigured("ACTUALBUDGET_URL").into());
+        }
         if self.actualbudget_key.is_empty() {
-            return Err(anyhow!("ACTUALBUDGET_KEY not set"));
+            return Err(NotConfigured("ACTUALBUDGET_KEY").into());
         }
         if self.actualbudget_sync_id.is_empty() {
-            return Err(anyhow!("ACTUALBUDGET_SYNC_ID not set (Actual → Settings → Show advanced settings → Sync ID)"));
+            return Err(NotConfigured("ACTUALBUDGET_SYNC_ID").into());
         }
 
         let now   = Local::now();
@@ -464,7 +504,7 @@ impl Sources {
 impl Sources {
     async fn agenda(&self) -> Result<Vec<AgendaItem>> {
         if self.ics_urls.is_empty() {
-            return Err(anyhow!("ICS_URLS not configured"));
+            return Err(NotConfigured("ICS_URLS").into());
         }
 
         let today = Local::now().date_naive();
@@ -491,9 +531,8 @@ impl Sources {
         items.dedup_by(|a, b| a.time == b.time && a.title == b.title);
         items.truncate(6);
 
-        if items.is_empty() {
-            return Err(anyhow!("no events for today across {} feeds", self.ics_urls.len()));
-        }
+        // Empty is a valid result (no meetings today) — return Ok so the
+        // parent renders an empty agenda instead of the mock fallback.
         Ok(items)
     }
 }
