@@ -10,13 +10,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = "0.4"
 chrono-tz = "0.10"
-image = { version = "0.25", default-features = false, features = ["png"] }
 png = "0.17"
+embedded-graphics = "0.8"
+u8g2-fonts = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 trmnl = { version = "0.1", features = ["axum"] }
-chromiumoxide = { version = "0.7", features = ["tokio-runtime"] }
 futures = "0.3"
 anyhow = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset", "http2"] }

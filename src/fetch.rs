@@ -603,11 +603,15 @@ fn parse_ical_dtstart(value: &str, tzid: Option<&str>) -> Option<(chrono::DateTi
         let local = if is_utc {
             Utc.from_utc_datetime(&naive).with_timezone(&Local)
         } else if let Some(tz_str) = tzid {
-            match tz_str.parse::<chrono_tz::Tz>() {
-                Ok(tz) => tz.from_local_datetime(&naive).single()?.with_timezone(&Local),
-                Err(_) => {
-                    // Unknown / Outlook-shaped TZID (e.g. "Pacific Standard Time"):
-                    // treat as floating local rather than dropping the event.
+            // Try IANA first; if that fails, try the CLDR Windows-name
+            // mapping (Outlook / Exchange feeds use names like
+            // "W. Europe Standard Time"). Only warn if both lookups fail.
+            let resolved: Option<chrono_tz::Tz> = tz_str.parse().ok().or_else(|| {
+                crate::windows_tz::windows_to_iana(tz_str).and_then(|iana| iana.parse().ok())
+            });
+            match resolved {
+                Some(tz) => tz.from_local_datetime(&naive).single()?.with_timezone(&Local),
+                None => {
                     warn!("unknown TZID '{tz_str}', treating as local");
                     Local.from_local_datetime(&naive).single()?
                 }
