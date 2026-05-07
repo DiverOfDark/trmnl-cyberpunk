@@ -30,6 +30,11 @@ impl Sources {
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(10))
+                // Outlook published-calendar endpoints (and a few other ICS
+                // hosts) refuse the default reqwest user-agent and respond
+                // with TLS-level resets that surface here as a bare
+                // "error sending request". A browser-shaped UA gets through.
+                .user_agent("Mozilla/5.0 (compatible; trmnl-cyberpunk/0.1; +https://github.com/DiverOfDark/trmnl-cyberpunk)")
                 .build()
                 .unwrap(),
             prometheus: std::env::var("PROMETHEUS_URL").unwrap_or_else(|_| {
@@ -345,6 +350,20 @@ impl Sources {
     }
 }
 
+/// Render an error and its `source()` chain on a single line so we can see
+/// the *actual* cause (TLS handshake failure, connect refused, etc.) instead
+/// of just reqwest's outermost "error sending request" wrapper.
+fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut current = e.source();
+    while let Some(cause) = current {
+        out.push_str(" → ");
+        out.push_str(&cause.to_string());
+        current = cause.source();
+    }
+    out
+}
+
 // ── ActualBudget HTTP API ─────────────────────────────────────────────────
 
 /// GET an x-api-key-authed endpoint and parse JSON, with detailed error
@@ -463,7 +482,7 @@ impl Sources {
         for (url, r) in self.ics_urls.iter().zip(results) {
             match r {
                 Ok(body) => items.extend(parse_ical_events(&body, today)),
-                Err(e) => warn!("ics fetch failed for {url}: {e}"),
+                Err(e) => warn!("ics fetch failed for {url}: {}", error_chain(&e)),
             }
         }
 
