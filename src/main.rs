@@ -40,6 +40,11 @@ struct AppState {
     data: Arc<RwLock<DashData>>,
     sources: Arc<Sources>,
     render_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Unix epoch (seconds) of the last successful render. Bumped on every
+    /// regenerate; embedded into `/api/display` URLs as a cache-buster
+    /// (`dashboard-{epoch}.png`) so the firmware skips its 24h dedupe and
+    /// fetches the new bytes whenever the image content has actually changed.
+    last_render_at: Arc<RwLock<i64>>,
     local_mode: bool,
 }
 
@@ -61,9 +66,25 @@ fn refresh_secs() -> u32 {
         .unwrap_or(3600)
 }
 
-fn build_display_response() -> DisplayResponse {
-    let url = format!("{}/dashboard.png", base_url());
-    DisplayResponse::new(&url, "dashboard.png").with_refresh_rate(refresh_secs())
+/// Construct the filename used in `/api/display` responses. The firmware
+/// expects a 10-digit Unix epoch suffix (`dashboard-1778185416.png`) and uses
+/// that suffix to dedupe cached images for ~24h — so the filename has to
+/// change whenever the rendered bytes change.
+fn dashboard_filename(epoch: i64) -> String {
+    if epoch > 0 {
+        format!("dashboard-{epoch}.png")
+    } else {
+        // Pre-first-render fallback. The firmware will refetch once we've
+        // rendered something and the next /api/display response carries
+        // a real epoch.
+        "dashboard.png".to_string()
+    }
+}
+
+fn build_display_response(epoch: i64) -> DisplayResponse {
+    let filename = dashboard_filename(epoch);
+    let url = format!("{}/{filename}", base_url());
+    DisplayResponse::new(&url, &filename).with_refresh_rate(refresh_secs())
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
@@ -91,6 +112,7 @@ async fn regenerate(state: &AppState) {
     match png {
         Ok(Ok(bytes)) => {
             *state.png_cache.write().await = bytes;
+            *state.last_render_at.write().await = chrono::Utc::now().timestamp();
             info!("dashboard regenerated");
         }
         Ok(Err(e)) => warn!("render failed: {e}"),
@@ -100,13 +122,15 @@ async fn regenerate(state: &AppState) {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-async fn api_setup(State(_): State<AppState>, device: DeviceInfo) -> impl IntoResponse {
+async fn api_setup(State(state): State<AppState>, device: DeviceInfo) -> impl IntoResponse {
     info!(mac = %device.mac_address, fw = ?device.firmware_version, "device setup");
     let api_key = std::env::var("TRMNL_API_KEY").unwrap_or_else(|_| "cyberpunk-byos".into());
+    let epoch = *state.last_render_at.read().await;
+    let filename = dashboard_filename(epoch);
     Json(json!({
         "api_key":     api_key,
         "friendly_id": mac_short_id(&device.mac_address),
-        "image_url":   format!("{}/dashboard.png", base_url()),
+        "image_url":   format!("{}/{filename}", base_url()),
         "message":     "TRMNL//CYBERPUNK — BYOS",
     }))
 }
@@ -126,11 +150,19 @@ async fn api_display(State(state): State<AppState>, device: DeviceInfo) -> Json<
     let s = state.clone();
     tokio::spawn(async move { regenerate(&s).await });
 
-    Json(build_display_response())
+    let epoch = *state.last_render_at.read().await;
+    Json(build_display_response(epoch))
 }
 
-async fn api_log(State(_): State<AppState>, device: DeviceInfo) -> StatusCode {
-    warn!(mac = %device.mac_address, "device log received");
+async fn api_log(State(_): State<AppState>, device: DeviceInfo, body: String) -> StatusCode {
+    // Try to pretty-print as JSON (matches TRMNL spec body shape) and fall
+    // back to the raw bytes if the device sent something else, so a malformed
+    // log payload still surfaces in our output instead of getting dropped.
+    let pretty = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+        .unwrap_or_else(|| body.clone());
+    info!(mac = %device.mac_address, "device log:\n{pretty}");
     StatusCode::NO_CONTENT
 }
 
@@ -152,6 +184,18 @@ async fn api_data(State(state): State<AppState>) -> impl IntoResponse {
         "budget":   data.budget,
         "alerts":   data.alerts,
     }))
+}
+
+/// Fallback that serves the cached PNG for any `/dashboard-*.png` request,
+/// and a real 404 for everything else. The firmware fetches a cache-buster
+/// URL like `/dashboard-1778185416.png`; the epoch in the path is purely a
+/// version marker — we always return the latest render.
+async fn serve_dashboard_alias(State(state): State<AppState>, uri: axum::http::Uri) -> Response {
+    let path = uri.path();
+    if path.starts_with("/dashboard-") && path.ends_with(".png") {
+        return serve_png(State(state)).await;
+    }
+    (StatusCode::NOT_FOUND, "not found").into_response()
 }
 
 async fn serve_png(State(state): State<AppState>) -> Response {
@@ -201,11 +245,12 @@ async fn main() {
     let bound = listener.local_addr().unwrap();
 
     let state = AppState {
-        png_cache:    Arc::new(RwLock::new(Vec::new())),
-        device_state: Arc::new(RwLock::new(DeviceState::default())),
-        data:         Arc::new(RwLock::new(DashData::mock())),
-        sources:      Arc::new(Sources::from_env()),
-        render_lock:  Arc::new(tokio::sync::Mutex::new(())),
+        png_cache:      Arc::new(RwLock::new(Vec::new())),
+        device_state:   Arc::new(RwLock::new(DeviceState::default())),
+        data:           Arc::new(RwLock::new(DashData::mock())),
+        sources:        Arc::new(Sources::from_env()),
+        render_lock:    Arc::new(tokio::sync::Mutex::new(())),
+        last_render_at: Arc::new(RwLock::new(0)),
         local_mode,
     };
 
@@ -217,6 +262,11 @@ async fn main() {
         .route("/dashboard.png",  get(serve_png))
         .route("/refresh",        get(force_refresh))
         .route("/health",         get(health))
+        // Catch the cache-buster filename (`/dashboard-1778185416.png`).
+        // Axum 0.8 doesn't allow `{param}` mixed with literal text in the
+        // same path segment, so we use a fallback handler that pattern-
+        // matches the path itself.
+        .fallback(serve_dashboard_alias)
         .with_state(state.clone());
 
     if let Some(path) = render_to {
