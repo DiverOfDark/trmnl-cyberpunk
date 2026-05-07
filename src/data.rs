@@ -1,5 +1,6 @@
 use chrono::{Datelike, Local};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 #[derive(Clone, Serialize)]
 pub struct HostData {
@@ -36,10 +37,19 @@ pub struct AgendaItem {
     pub tag: String,
 }
 
-#[derive(Clone, Serialize)]
+/// One row in the OPS panel's task list. Pushed via `PUT /api/tasks` from an
+/// external service (e.g. an AI agent). `priority == "HI"` is rendered in
+/// red; any other value (typically "MED" / "LOW") is rendered in black.
+/// `done` strikes the row through.
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
 pub struct Task {
+    /// Task description. Strings longer than the panel's column width are
+    /// ellipsized at render time.
     pub text: String,
+    /// `true` to render the row with a strikethrough.
     pub done: bool,
+    /// Priority label: "HI" / "MED" / "LOW" (case-sensitive). Unknown
+    /// values render in black like "MED".
     pub priority: String,
 }
 

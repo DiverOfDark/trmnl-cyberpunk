@@ -16,28 +16,36 @@ pub const H: u32 = 480;
 
 // ── Palette ────────────────────────────────────────────────────────────────
 //
-// Order is fixed; downstream PNG encoder writes these as the PLTE chunk.
+// Index order MUST match the device firmware's expectation (Spectra 6 panel
+// at src/display.cpp:749-756 in the E1002 firmware). The firmware reads the
+// per-pixel index directly and looks up its own measured RGB on the panel —
+// so the order below is what determines which physical ink each pixel gets.
+//
+// RGB values are the *measured* on-panel colors (also from the firmware
+// table). They're muted compared to vivid sRGB equivalents — the rendered
+// PNG looks slightly olive/dim on a normal monitor but accurately previews
+// what the panel displays.
 
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum C {
     Black  = 0,
     White  = 1,
-    Red    = 2,
-    Yellow = 3,
-    Green  = 4,
-    Blue   = 5,
+    Yellow = 2,
+    Red    = 3,
+    Blue   = 4,
+    Green  = 5,
 }
 
 impl C {
     pub fn rgb(self) -> Rgb888 {
         match self {
-            C::Black  => Rgb888::new(0x00, 0x00, 0x00),
-            C::White  => Rgb888::new(0xff, 0xff, 0xff),
-            C::Red    => Rgb888::new(0xc1, 0x12, 0x1f),
-            C::Yellow => Rgb888::new(0xe5, 0xb8, 0x00),
-            C::Green  => Rgb888::new(0x00, 0x80, 0x40),
-            C::Blue   => Rgb888::new(0x10, 0x40, 0xa0),
+            C::Black  => Rgb888::new(0x02, 0x02, 0x02),
+            C::White  => Rgb888::new(0xb3, 0xb6, 0xab),
+            C::Yellow => Rgb888::new(0xcd, 0xca, 0x00),
+            C::Red    => Rgb888::new(0x75, 0x0a, 0x00),
+            C::Blue   => Rgb888::new(0x00, 0x2f, 0x6b),
+            C::Green  => Rgb888::new(0x21, 0x45, 0x28),
         }
     }
 
@@ -46,8 +54,10 @@ impl C {
     }
 }
 
+const PALETTE_ORDER: [C; 6] = [C::Black, C::White, C::Yellow, C::Red, C::Blue, C::Green];
+
 pub fn palette_bytes() -> Vec<u8> {
-    [C::Black, C::White, C::Red, C::Yellow, C::Green, C::Blue]
+    PALETTE_ORDER
         .iter()
         .flat_map(|c| {
             let rgb = c.rgb();
@@ -61,10 +71,9 @@ pub fn palette_bytes() -> Vec<u8> {
 /// composed primitives might) snap to a real palette color rather than
 /// silently writing a transparent pixel.
 fn nearest_index(rgb: Rgb888) -> u8 {
-    let cs = [C::Black, C::White, C::Red, C::Yellow, C::Green, C::Blue];
     let mut best = 0u8;
     let mut best_d = i32::MAX;
-    for c in cs {
+    for c in PALETTE_ORDER {
         let p = c.rgb();
         let dr = rgb.r() as i32 - p.r() as i32;
         let dg = rgb.g() as i32 - p.g() as i32;

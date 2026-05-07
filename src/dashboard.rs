@@ -349,54 +349,47 @@ fn draw_weather(c: &mut Canvas, w: Option<&WeatherData>) {
     let content_y = draw_section_header(c, panel, "WX", "// 01");
 
     let Some(w) = w else {
-        // Not configured — show a placeholder so the panel doesn't read as
-        // "0°" mock data.
         draw_text(c, &f_lg_bold(), "—", panel.x + 12, content_y + 32, C::Black, Align::Left);
         draw_text(c, &f_small(), "WEATHER NOT SET", panel.x + 12, content_y + 50, C::Black, Align::Left);
         return;
     };
 
-    // Big temperature.
+    // Big temperature, with a bit of breathing room from the section header.
     let temp_str = format!("{}", w.temp_c);
     let temp_x = panel.x + 12;
-    let temp_baseline = content_y + 88;
+    let temp_baseline = content_y + 100;
     draw_text(c, &f_temperature(), &temp_str, temp_x, temp_baseline, C::Black, Align::Left);
 
-    // Degree symbol — small ring just past the digits' right edge.
+    // Degree ring just past the digits.
     let temp_w = text_width(&f_temperature(), &temp_str) as i32;
     let deg_r = 8i32;
     let deg_gap = 8i32;
     let deg_cx = temp_x + temp_w + deg_gap + deg_r;
-    let deg_cy = content_y + 18;
+    let deg_cy = content_y + 30;
     draw_circle_outline(c, deg_cx, deg_cy, deg_r, 2, C::Red);
 
-    // Side info (condition + HI/LO). Land it past the degree ring with a
-    // safety margin so 2-digit temps still leave room. If the panel is too
-    // narrow, drop the side block to a second column below the digits.
+    // Side info (condition + HI/LO).
     let side_x = deg_cx + deg_r + 12;
     let side_avail = panel.right() - 12 - side_x;
-    // 70 px just fits "HI 99°  LO -9°" in helvR08 — go to the stacked
-    // fallback only on truly cramped temperatures (3-digit °F etc.).
     if side_avail >= 70 {
-        draw_text(c, &f_body_bold(), &w.condition, side_x, content_y + 28, C::Black, Align::Left);
+        draw_text(c, &f_body_bold(), &w.condition, side_x, content_y + 40, C::Black, Align::Left);
         draw_text(
             c,
             &f_small(),
             &format!("HI {}°  LO {}°", w.hi, w.lo),
             side_x,
-            content_y + 44,
+            content_y + 56,
             C::Black,
             Align::Left,
         );
     } else {
-        // Fallback: stack under the temp if the row is too tight (e.g. 3-digit °F).
-        draw_text(c, &f_body_bold(), &w.condition, temp_x, content_y + 110, C::Black, Align::Left);
+        draw_text(c, &f_body_bold(), &w.condition, temp_x, content_y + 122, C::Black, Align::Left);
         draw_text(
             c,
             &f_small(),
             &format!("HI {}°  LO {}°", w.hi, w.lo),
             temp_x,
-            content_y + 126,
+            content_y + 138,
             C::Black,
             Align::Left,
         );
@@ -406,10 +399,19 @@ fn draw_weather(c: &mut Canvas, w: Option<&WeatherData>) {
     let fc_h = 48u32;
     let fc_y = panel.bottom() - fc_h as i32 - 6;
     c.hline(panel.x + 12, fc_y, panel.w - 24, C::Black);
+
+    // Big condition icon centred in the empty band between the temp digits
+    // and the forecast grid.
+    let icon_band_top = temp_baseline + 16;
+    let icon_band_bot = fc_y - 6;
+    let icon_cy = (icon_band_top + icon_band_bot) / 2;
+    let icon_cx = panel.x + panel.w as i32 / 2;
+    let icon_size = (icon_band_bot - icon_band_top - 8).clamp(40, 90);
+    draw_weather_icon(c, icon_cx, icon_cy, icon_size, &w.condition, C::Black);
+
     let cell_w = (panel.w - 24) / 4;
     for (i, day) in w.forecast.iter().take(4).enumerate() {
         let cx = panel.x + 12 + (cell_w * i as u32) as i32 + cell_w as i32 / 2;
-        // dashed divider on right (skip last)
         if i < 3 {
             let dx = panel.x + 12 + (cell_w * (i + 1) as u32) as i32;
             for k in 0..(fc_h / 4) {
@@ -418,8 +420,155 @@ fn draw_weather(c: &mut Canvas, w: Option<&WeatherData>) {
             }
         }
         draw_text(c, &f_small_bold(), &day.day, cx, fc_y + 12, C::Black, Align::Center);
-        draw_text(c, &f_xl_bold(),    &format!("{}°", day.hi), cx, fc_y + 32, C::Black, Align::Center);
-        draw_text(c, &f_small(),      &format!("{}° {}", day.lo, day.cond), cx, fc_y + 44, C::Black, Align::Center);
+        draw_text(c, &f_xl_bold(), &format!("{}°", day.hi), cx, fc_y + 32, C::Black, Align::Center);
+
+        // Bottom row: small condition icon + lo temp instead of "° CLOUD".
+        let lo_str = format!("{}°", day.lo);
+        let lo_w = text_width(&f_small(), &lo_str) as i32;
+        let icon_w = 12i32;
+        let row_w = lo_w + 4 + icon_w;
+        let row_x0 = cx - row_w / 2;
+        draw_text(c, &f_small(), &lo_str, row_x0, fc_y + 44, C::Black, Align::Left);
+        draw_weather_icon(
+            c,
+            row_x0 + lo_w + 4 + icon_w / 2,
+            fc_y + 40,
+            icon_w,
+            &day.cond,
+            C::Black,
+        );
+    }
+}
+
+// ── Weather icons ──────────────────────────────────────────────────────────
+//
+// Drawn as primitives at runtime (no bitmap assets to ship). Each icon is
+// keyed off a free-form condition string; unknown values fall back to cloud.
+
+fn draw_weather_icon(c: &mut Canvas, cx: i32, cy: i32, size: i32, condition: &str, color: C) {
+    let cond = condition.to_uppercase();
+    match cond.as_str() {
+        "SUN" | "CLEAR" | "SUNNY" | "FAIR" => draw_sun(c, cx, cy, size, color),
+        "RAIN" | "RAINY" | "SHOWERS" | "DRIZZLE" => draw_rain(c, cx, cy, size, color),
+        "STORM" | "THUNDER" | "THUNDERSTORM" => draw_storm(c, cx, cy, size, color),
+        "SNOW" | "SNOWY" | "SLEET" => draw_snow(c, cx, cy, size, color),
+        "FOG" | "MIST" | "HAZE" | "SMOKE" => draw_fog(c, cx, cy, size, color),
+        // CLOUD / CLOUDS / CLOUDY / OVERCAST / unknown
+        _ => draw_cloud(c, cx, cy, size, color),
+    }
+}
+
+fn fill_disc(c: &mut Canvas, cx: i32, cy: i32, r: i32, color: C) {
+    let r2 = r * r;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy <= r2 {
+                c.put(cx + dx, cy + dy, color);
+            }
+        }
+    }
+}
+
+/// Cloud silhouette: 3 stacked filled discs + flat-bottomed rect.
+fn draw_cloud(c: &mut Canvas, cx: i32, cy: i32, size: i32, color: C) {
+    let r1 = (size / 4).max(3);
+    let r2 = (size / 3).max(4);
+    let r3 = (size / 4).max(3);
+    let bottom = cy + size / 4;
+    fill_disc(c, cx - size / 3, cy + size / 12, r1, color);
+    fill_disc(c, cx,             cy - size / 12, r2, color);
+    fill_disc(c, cx + size / 3, cy + size / 12, r3, color);
+    let bottom_w = (size as u32).saturating_sub(4);
+    let bottom_h = (size / 6).max(2) as u32;
+    c.fill_rect(
+        Rect::new(cx - bottom_w as i32 / 2, bottom - bottom_h as i32, bottom_w, bottom_h),
+        color,
+    );
+}
+
+/// Sun: filled disc + 8 short rays.
+fn draw_sun(c: &mut Canvas, cx: i32, cy: i32, size: i32, color: C) {
+    let r = (size / 4).max(3);
+    fill_disc(c, cx, cy, r, color);
+    let inner = r + (size / 12).max(2);
+    let outer = r + (size / 4).max(3);
+    let dirs: [(i32, i32); 8] = [
+        ( 1, 0), (-1, 0), (0,  1), (0, -1),
+        ( 1, 1), ( 1,-1), (-1, 1), (-1,-1),
+    ];
+    for (dx, dy) in dirs {
+        // Diagonal rays use a /√2 scale; integer math is close enough.
+        let scale_num = if dx.abs() + dy.abs() == 2 { 7 } else { 10 };
+        let scale_den = 10;
+        let i = inner * scale_num / scale_den;
+        let o = outer * scale_num / scale_den;
+        let x0 = cx + dx * i;
+        let y0 = cy + dy * i;
+        let x1 = cx + dx * o;
+        let y1 = cy + dy * o;
+        // Thin filled rectangle per ray; for diagonals we just stamp little
+        // 2-pixel discs along the segment which keeps the shape recognizable
+        // without writing a thick-line rasterizer.
+        let steps = (o - i).max(1);
+        for s in 0..=steps {
+            let t = if steps == 0 { 0.0 } else { s as f32 / steps as f32 };
+            let x = x0 + ((x1 - x0) as f32 * t) as i32;
+            let y = y0 + ((y1 - y0) as f32 * t) as i32;
+            fill_disc(c, x, y, 1, color);
+        }
+    }
+}
+
+/// Rain: cloud (raised) + 3 short vertical drops.
+fn draw_rain(c: &mut Canvas, cx: i32, cy: i32, size: i32, color: C) {
+    draw_cloud(c, cx, cy - size / 4, size, color);
+    let drop_y = cy + size / 6;
+    let drop_h = (size / 4).max(4) as u32;
+    let drop_w = 2u32.max((size / 30) as u32);
+    for i in 0..3 {
+        let dx = -size / 4 + i * size / 4;
+        c.fill_rect(Rect::new(cx + dx - drop_w as i32 / 2, drop_y, drop_w, drop_h), color);
+    }
+}
+
+/// Storm: cloud + lightning-bolt zigzag.
+fn draw_storm(c: &mut Canvas, cx: i32, cy: i32, size: i32, color: C) {
+    draw_cloud(c, cx, cy - size / 4, size, color);
+    let bx = cx - size / 16;
+    let by = cy + size / 12;
+    let bw = (size / 14).max(3) as u32;
+    let bh1 = (size / 5).max(4) as u32;
+    let bh2 = (size / 6).max(3) as u32;
+    c.fill_rect(Rect::new(bx, by, bw, bh1), color);
+    c.fill_rect(
+        Rect::new(bx - size / 12, by + bh1 as i32, (size / 12 + bw as i32) as u32, bw),
+        color,
+    );
+    c.fill_rect(Rect::new(bx - size / 12, by + bh1 as i32, bw, bh2), color);
+}
+
+/// Snow: cloud + 3 plus-sign flakes.
+fn draw_snow(c: &mut Canvas, cx: i32, cy: i32, size: i32, color: C) {
+    draw_cloud(c, cx, cy - size / 4, size, color);
+    let y = cy + size / 6;
+    let arm = (size / 14).max(3);
+    for i in 0..3 {
+        let dx = -size / 4 + i * size / 4;
+        let x = cx + dx;
+        c.fill_rect(Rect::new(x - arm, y, (arm * 2 + 1) as u32, 2), color);
+        c.fill_rect(Rect::new(x, y - arm, 2, (arm * 2 + 1) as u32), color);
+    }
+}
+
+/// Fog: 3 staggered horizontal bars.
+fn draw_fog(c: &mut Canvas, cx: i32, cy: i32, size: i32, color: C) {
+    let bar_h = 2u32.max((size / 14) as u32);
+    let gap = (size / 8).max(3);
+    let widths = [size, size - size / 6, size - size / 4];
+    for (i, w) in widths.iter().enumerate() {
+        let y = cy - gap + (i as i32) * gap;
+        let off = ((i as i32) % 2) * (size / 12);
+        c.fill_rect(Rect::new(cx - w / 2 + off, y, *w as u32, bar_h), color);
     }
 }
 
@@ -484,34 +633,40 @@ fn draw_sys(c: &mut Canvas, hosts: &[HostData]) {
     let panel = col2_bot();
     let content_y = draw_section_header(c, panel, "SYS", "// 03");
 
-    let Some(host) = hosts.first().cloned() else {
+    if hosts.is_empty() {
         draw_text(c, &f_small(), "PROMETHEUS_URL NOT SET", panel.x + 12, content_y + 18, C::Black, Align::Left);
         return;
+    }
+
+    // Cluster summary: arithmetic means across all hosts. The top row
+    // mirrors the original single-host metric grid so the dominant numbers
+    // ($1842-style) keep their visual prominence; the per-host detail rows
+    // sit below in a compact list.
+    let n = hosts.len() as u32;
+    let avg = |f: fn(&HostData) -> u32| -> u32 {
+        hosts.iter().map(f).sum::<u32>() / n.max(1)
     };
+    let cluster: [(&str, u32, &str); 4] = [
+        ("CPU", avg(|h| h.cpu as u32),      "%"),
+        ("TMP", avg(|h| h.cpu_temp as u32), "°"),
+        ("RAM", avg(|h| h.ram_pct as u32),  "%"),
+        ("DSK", avg(|h| h.disk_pct as u32), "%"),
+    ];
 
     let pad_x = 12;
-    let metrics: [(&str, u32, &str); 4] = [
-        ("CPU", host.cpu  as u32,      "%"),
-        ("TMP", host.cpu_temp as u32,  "°"),
-        ("RAM", host.ram_pct as u32,   "%"),
-        ("DSK", host.disk_pct as u32,  "%"),
-    ];
-    let cell_w  = (panel.w - pad_x as u32 * 2 - 24) / 4;
+    let cell_w   = (panel.w - pad_x as u32 * 2 - 24) / 4;
     let cell_gap = 8;
-    for (i, (lbl, val, unit)) in metrics.iter().enumerate() {
+    for (i, (lbl, val, unit)) in cluster.iter().enumerate() {
         let cx = panel.x + pad_x + (i as i32) * (cell_w as i32 + cell_gap);
         let cy = content_y;
         let cell = Rect::new(cx, cy, cell_w, 50);
         c.stroke_rect(cell, 1, C::Black);
 
         draw_text(c, &f_small_bold(), lbl, cx + 4, cy + 11, C::Black, Align::Left);
-
-        // Value + small red unit
         draw_text(c, &f_huge_bold(), &val.to_string(), cx + 4, cy + 32, C::Black, Align::Left);
         let val_w = text_width(&f_huge_bold(), &val.to_string()) as i32;
         draw_text(c, &f_body(), unit, cx + 6 + val_w, cy + 32, C::Red, Align::Left);
 
-        // Inset progress bar
         let bar = Rect::new(cx + 4, cy + 38, cell_w - 8, 6);
         c.stroke_rect(bar, 1, C::Black);
         let fill_w = bar.w.saturating_sub(2) * (*val).min(100) / 100;
@@ -519,17 +674,36 @@ fn draw_sys(c: &mut Canvas, hosts: &[HostData]) {
         c.fill_rect(Rect::new(bar.x + 1, bar.y + 1, fill_w, 4), bar_color);
     }
 
-    // Meta line: HOST / UPTIME / LOAD
-    let meta_y = content_y + 64;
-    draw_text(c, &f_small(),
-        &format!("HOST {}", host.name.to_uppercase()),
-        panel.x + pad_x, meta_y, C::Black, Align::Left);
-    draw_text(c, &f_small(),
-        &format!("UPTIME {}d", host.uptime_days),
-        panel.x + panel.w as i32 / 2, meta_y, C::Black, Align::Center);
-    draw_text(c, &f_small(),
-        &format!("LOAD {:.2} / {:.2} / {:.2}", host.load[0], host.load[1], host.load[2]),
-        panel.right() - pad_x, meta_y, C::Black, Align::Right);
+    // Per-host detail rows. With the panel at 207 px tall and the cluster
+    // grid taking ~60 px below the section header, we have ~120 px for
+    // rows; at 14 px each that fits 8 hosts with margin.
+    let list_y = content_y + 56;
+    let row_h = 14i32;
+    let max_rows = 6.min(hosts.len());
+
+    // Column anchors: NAME (left), CPU/TMP/RAM/DSK (right-aligned in 4 evenly
+    // spaced bands). Right-aligning numbers makes scanning a column
+    // ("which node is hottest?") easy.
+    let cols_right_edge = panel.right() - pad_x;
+    let col_w = 38i32; // ~"100%" + margin
+    let cols_left_edge = cols_right_edge - col_w * 4;
+    let name_max_w = (cols_left_edge - (panel.x + pad_x) - 4).max(40) as u32;
+
+    for (i, h) in hosts.iter().take(max_rows).enumerate() {
+        let y = list_y + (i as i32) * row_h;
+        // Name (truncate to fit before metric columns)
+        let name = clip_to_width(&f_small_bold(), &h.name.to_uppercase(), name_max_w);
+        draw_text(c, &f_small_bold(), &name, panel.x + pad_x, y + 9, C::Black, Align::Left);
+
+        // Each metric right-aligned in its own band; > 70% drawn in red.
+        let metrics = [h.cpu as u32, h.cpu_temp as u32, h.ram_pct as u32, h.disk_pct as u32];
+        let units = ["%", "°", "%", "%"];
+        for (j, (val, unit)) in metrics.iter().zip(units.iter()).enumerate() {
+            let col_right = cols_left_edge + col_w * (j as i32 + 1);
+            let color = if *val > 70 { C::Red } else { C::Black };
+            draw_text(c, &f_small(), &format!("{val}{unit}"), col_right, y + 9, color, Align::Right);
+        }
+    }
 }
 
 // ── Budget panel ───────────────────────────────────────────────────────────
