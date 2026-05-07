@@ -72,25 +72,34 @@ fn refresh_secs() -> u32 {
         .unwrap_or(3600)
 }
 
-/// Construct the filename used in `/api/display` responses. The firmware
-/// expects a 10-digit Unix epoch suffix (`dashboard-1778185416.png`) and uses
-/// that suffix to dedupe cached images for ~24h — so the filename has to
-/// change whenever the rendered bytes change.
+/// Filename the firmware uses as its 24h dedupe cache key. It expects a
+/// 10-digit Unix epoch suffix (`dashboard-1778185416.png`) so the value
+/// must change whenever the rendered bytes change.
 fn dashboard_filename(epoch: i64) -> String {
     if epoch > 0 {
         format!("dashboard-{epoch}.png")
     } else {
-        // Pre-first-render fallback. The firmware will refetch once we've
-        // rendered something and the next /api/display response carries
-        // a real epoch.
+        // Pre-first-render fallback.
         "dashboard.png".to_string()
     }
 }
 
+/// URL the firmware downloads. Goes through `/dashboard/{epoch}` rather than
+/// `/dashboard-{epoch}.png` because Swagger UI is mounted at `/` and its
+/// wildcard catch-all would otherwise swallow any single-segment request
+/// (and reply 404 because Swagger has no such asset). Slash-separated
+/// segments don't conflict with the UI's wildcard.
+fn dashboard_url(epoch: i64) -> String {
+    if epoch > 0 {
+        format!("{}/dashboard/{epoch}", base_url())
+    } else {
+        format!("{}/dashboard.png", base_url())
+    }
+}
+
 fn build_display_response(epoch: i64) -> DisplayResponse {
-    let filename = dashboard_filename(epoch);
-    let url = format!("{}/{filename}", base_url());
-    DisplayResponse::new(&url, &filename).with_refresh_rate(refresh_secs())
+    DisplayResponse::new(dashboard_url(epoch), dashboard_filename(epoch))
+        .with_refresh_rate(refresh_secs())
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
@@ -135,11 +144,10 @@ async fn api_setup(State(state): State<AppState>, device: DeviceInfo) -> impl In
     info!(mac = %device.mac_address, fw = ?device.firmware_version, "device setup");
     let api_key = std::env::var("TRMNL_API_KEY").unwrap_or_else(|_| "cyberpunk-byos".into());
     let epoch = *state.last_render_at.read().await;
-    let filename = dashboard_filename(epoch);
     Json(json!({
         "api_key":     api_key,
         "friendly_id": mac_short_id(&device.mac_address),
-        "image_url":   format!("{}/{filename}", base_url()),
+        "image_url":   dashboard_url(epoch),
         "message":     "TRMNL//CYBERPUNK — BYOS",
     }))
 }
@@ -263,18 +271,6 @@ async fn api_data(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
-/// Fallback that serves the cached PNG for any `/dashboard-*.png` request,
-/// and a real 404 for everything else. The firmware fetches a cache-buster
-/// URL like `/dashboard-1778185416.png`; the epoch in the path is purely a
-/// version marker — we always return the latest render.
-async fn serve_dashboard_alias(State(state): State<AppState>, uri: axum::http::Uri) -> Response {
-    let path = uri.path();
-    if path.starts_with("/dashboard-") && path.ends_with(".png") {
-        return serve_png(State(state)).await;
-    }
-    (StatusCode::NOT_FOUND, "not found").into_response()
-}
-
 async fn serve_png(State(state): State<AppState>) -> Response {
     let bytes = state.png_cache.read().await.clone();
     (
@@ -300,7 +296,7 @@ async fn health() -> impl IntoResponse {
 #[openapi(
     info(
         title = "trmnl-cyberpunk",
-        description = "BYOS server for TRMNL e-ink panels with the cyberpunk dashboard. Public endpoints: tasks (push from external services) + data (snapshot). Device-protocol endpoints (`/api/setup`, `/api/display`, `/api/log`) and the rendered PNG (`/dashboard.png`, `/dashboard-{epoch}.png`) are also reachable but not part of this schema.",
+        description = "BYOS server for TRMNL e-ink panels with the cyberpunk dashboard. Public endpoints: tasks (push from external services) + data (snapshot). Device-protocol endpoints (`/api/setup`, `/api/display`, `/api/log`) and the rendered PNG (`/dashboard.png`, `/dashboard/{epoch}`) are also reachable but not part of this schema.",
         version = env!("CARGO_PKG_VERSION"),
     ),
     paths(get_tasks, put_tasks, api_data),
@@ -362,17 +358,15 @@ async fn main() {
         .route("/api/data",       get(api_data))
         .route("/api/tasks",      get(get_tasks).put(put_tasks))
         .route("/dashboard.png",  get(serve_png))
+        // Cache-bustered URL for the firmware. `{epoch}` is just a marker
+        // that changes whenever the rendered bytes do; the handler ignores
+        // it and always serves the current cache. Slash-separated segments
+        // sidestep both axum-0.8's "no literals in a param segment" rule
+        // *and* Swagger UI's wildcard catch-all at `/`.
+        .route("/dashboard/{epoch}", get(serve_png))
         .route("/refresh",        get(force_refresh))
         .route("/health",         get(health))
-        // Swagger UI at `/`, OpenAPI JSON at `/openapi.json`.
-        // The merge happens before `.fallback`, so the Swagger routes
-        // beat the dashboard-alias fallback for `/` and `/openapi.json`.
         .merge(SwaggerUi::new("/").url("/openapi.json", ApiDoc::openapi()))
-        // Catch the cache-buster filename (`/dashboard-1778185416.png`).
-        // Axum 0.8 doesn't allow `{param}` mixed with literal text in the
-        // same path segment, so we use a fallback handler that pattern-
-        // matches the path itself.
-        .fallback(serve_dashboard_alias)
         .with_state(state.clone());
 
     if let Some(path) = render_to {
