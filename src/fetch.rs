@@ -197,6 +197,38 @@ fn to_map(pairs: Vec<(String, f64)>) -> HashMap<String, f64> {
     pairs.into_iter().collect()
 }
 
+/// Run a Prometheus instant query and pull two labels off each sample:
+/// the `instance` label (host key, normalized to drop the `:port` suffix)
+/// and `label_name`. Used to map IP-shaped `instance` values to readable
+/// `nodename` from `node_uname_info`.
+async fn prom_label_pairs(
+    client: &Client,
+    base: &str,
+    query: &str,
+    label_name: &str,
+) -> Result<Vec<(String, String)>> {
+    let url = format!("{}/api/v1/query", base);
+    let resp: Value = client
+        .get(&url)
+        .query(&[("query", query)])
+        .send()
+        .await?
+        .json()
+        .await?;
+    let mut out = Vec::new();
+    if let Some(arr) = resp["data"]["result"].as_array() {
+        for r in arr {
+            let inst = r["metric"]["instance"].as_str().unwrap_or("");
+            let key = inst.split(':').next().unwrap_or(inst).to_string();
+            let val = r["metric"][label_name].as_str().unwrap_or("").to_string();
+            if !key.is_empty() && !val.is_empty() {
+                out.push((key, val));
+            }
+        }
+    }
+    Ok(out)
+}
+
 // ── Host metrics ──────────────────────────────────────────────────────────
 
 impl Sources {
@@ -204,7 +236,7 @@ impl Sources {
         if self.prometheus.is_empty() {
             return Err(NotConfigured("PROMETHEUS_URL").into());
         }
-        let (cpu_r, temp_r, ram_r, disk_r, uptime_r, l1_r, l5_r, l15_r) = tokio::join!(
+        let (cpu_r, temp_r, ram_r, disk_r, uptime_r, l1_r, l5_r, l15_r, uname_r) = tokio::join!(
             prom_query(&self.client, &self.prometheus,
                 r#"100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)"#),
             prom_query(&self.client, &self.prometheus,
@@ -218,6 +250,13 @@ impl Sources {
             prom_query(&self.client, &self.prometheus, "node_load1"),
             prom_query(&self.client, &self.prometheus, "node_load5"),
             prom_query(&self.client, &self.prometheus, "node_load15"),
+            // Map IP-shaped `instance` labels (`192.168.1.10:9100`) to real
+            // hostnames via node_uname_info's `nodename` label so the panel
+            // shows "asgard" instead of "192.168.1.10".
+            prom_label_pairs(
+                &self.client, &self.prometheus,
+                "node_uname_info", "nodename",
+            ),
         );
 
         let cpu_map    = to_map(cpu_r.unwrap_or_default());
@@ -228,6 +267,7 @@ impl Sources {
         let l1_map     = to_map(l1_r.unwrap_or_default());
         let l5_map     = to_map(l5_r.unwrap_or_default());
         let l15_map    = to_map(l15_r.unwrap_or_default());
+        let uname_map: HashMap<String, String> = uname_r.unwrap_or_default().into_iter().collect();
 
         // Union of all known instances (prefer uptime as the canonical set)
         let mut hosts_set: std::collections::BTreeSet<String> =
@@ -242,18 +282,21 @@ impl Sources {
 
         let hosts = hosts_set
             .into_iter()
-            .map(|name| HostData {
-                cpu:         cpu_map.get(&name).copied().unwrap_or(0.0).round() as u8,
-                cpu_temp:    temp_map.get(&name).copied().unwrap_or(0.0).round() as u8,
-                ram_pct:     ram_map.get(&name).copied().unwrap_or(0.0).round() as u8,
-                disk_pct:    disk_map.get(&name).copied().unwrap_or(0.0).round() as u8,
-                uptime_days: uptime_map.get(&name).copied().unwrap_or(0.0) as u32,
-                load: [
-                    l1_map.get(&name).copied().unwrap_or(0.0) as f32,
-                    l5_map.get(&name).copied().unwrap_or(0.0) as f32,
-                    l15_map.get(&name).copied().unwrap_or(0.0) as f32,
-                ],
-                name,
+            .map(|key| {
+                let display_name = uname_map.get(&key).cloned().unwrap_or_else(|| key.clone());
+                HostData {
+                    cpu:         cpu_map.get(&key).copied().unwrap_or(0.0).round() as u8,
+                    cpu_temp:    temp_map.get(&key).copied().unwrap_or(0.0).round() as u8,
+                    ram_pct:     ram_map.get(&key).copied().unwrap_or(0.0).round() as u8,
+                    disk_pct:    disk_map.get(&key).copied().unwrap_or(0.0).round() as u8,
+                    uptime_days: uptime_map.get(&key).copied().unwrap_or(0.0) as u32,
+                    load: [
+                        l1_map.get(&key).copied().unwrap_or(0.0) as f32,
+                        l5_map.get(&key).copied().unwrap_or(0.0) as f32,
+                        l15_map.get(&key).copied().unwrap_or(0.0) as f32,
+                    ],
+                    name: display_name,
+                }
             })
             .collect();
 

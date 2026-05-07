@@ -335,19 +335,21 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind failed");
     let bound = listener.local_addr().unwrap();
 
-    // Seed the externally-pushed task list with the mock tasks so the panel
-    // has something to show before any client has called `PUT /api/tasks`.
-    let initial_mock = DashData::mock();
-    let initial_tasks = initial_mock.tasks.clone();
+    // Tasks start empty; clients populate them via `PUT /api/tasks`. The
+    // initial DashData uses mock for everything else (weather/budget/etc.)
+    // so the layout has content while integrations boot up — but we
+    // explicitly null out tasks here since they're externally-driven.
+    let mut initial_data = DashData::mock();
+    initial_data.tasks.clear();
 
     let state = AppState {
         png_cache:      Arc::new(RwLock::new(Vec::new())),
         device_state:   Arc::new(RwLock::new(DeviceState::default())),
-        data:           Arc::new(RwLock::new(initial_mock)),
+        data:           Arc::new(RwLock::new(initial_data)),
         sources:        Arc::new(Sources::from_env()),
         render_lock:    Arc::new(tokio::sync::Mutex::new(())),
         last_render_at: Arc::new(RwLock::new(0)),
-        tasks:          Arc::new(RwLock::new(initial_tasks)),
+        tasks:          Arc::new(RwLock::new(Vec::new())),
         local_mode,
     };
 

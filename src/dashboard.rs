@@ -656,28 +656,34 @@ fn draw_sys(c: &mut Canvas, hosts: &[HostData]) {
     let pad_x = 12;
     let cell_w   = (panel.w - pad_x as u32 * 2 - 24) / 4;
     let cell_gap = 8;
+    // Cell height bumped to 58 so the helvB24 number has room to sit clear
+    // of the helvB10 label above it (the big digits' ascender otherwise
+    // crashes into the label baseline).
+    let cell_h = 58u32;
     for (i, (lbl, val, unit)) in cluster.iter().enumerate() {
         let cx = panel.x + pad_x + (i as i32) * (cell_w as i32 + cell_gap);
         let cy = content_y;
-        let cell = Rect::new(cx, cy, cell_w, 50);
+        let cell = Rect::new(cx, cy, cell_w, cell_h);
         c.stroke_rect(cell, 1, C::Black);
 
-        draw_text(c, &f_small_bold(), lbl, cx + 4, cy + 11, C::Black, Align::Left);
-        draw_text(c, &f_huge_bold(), &val.to_string(), cx + 4, cy + 32, C::Black, Align::Left);
+        // Vertical layout inside the cell:
+        //   y+12  label baseline (helvB10 cap ≈ 7 → glyph y+5..y+12)
+        //   y+38  number baseline (helvB24 cap ≈ 17 → glyph y+21..y+38)
+        //   y+47  bar top (height 6, ends y+53 well inside the 58 px cell)
+        draw_text(c, &f_small_bold(), lbl, cx + 4, cy + 12, C::Black, Align::Left);
+        draw_text(c, &f_huge_bold(), &val.to_string(), cx + 4, cy + 38, C::Black, Align::Left);
         let val_w = text_width(&f_huge_bold(), &val.to_string()) as i32;
-        draw_text(c, &f_body(), unit, cx + 6 + val_w, cy + 32, C::Red, Align::Left);
+        draw_text(c, &f_body(), unit, cx + 6 + val_w, cy + 38, C::Red, Align::Left);
 
-        let bar = Rect::new(cx + 4, cy + 38, cell_w - 8, 6);
+        let bar = Rect::new(cx + 4, cy + 47, cell_w - 8, 6);
         c.stroke_rect(bar, 1, C::Black);
         let fill_w = bar.w.saturating_sub(2) * (*val).min(100) / 100;
         let bar_color = if *val > 70 { C::Red } else { C::Black };
         c.fill_rect(Rect::new(bar.x + 1, bar.y + 1, fill_w, 4), bar_color);
     }
 
-    // Per-host detail rows. With the panel at 207 px tall and the cluster
-    // grid taking ~60 px below the section header, we have ~120 px for
-    // rows; at 14 px each that fits 8 hosts with margin.
-    let list_y = content_y + 56;
+    // Per-host detail rows below the cluster grid.
+    let list_y = content_y + cell_h as i32 + 6;
     let row_h = 14i32;
     let max_rows = 6.min(hosts.len());
 
