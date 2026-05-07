@@ -308,7 +308,7 @@ fn draw_section_header(c: &mut Canvas, panel: Rect, en: &str, seq: &str) -> i32 
     let top   = panel.y + 8;
 
     // EN tag: black background, white text, ~16×16 px box
-    let tag_w = (text_width(&f_small_bold(), en) + 10) as u32;
+    let tag_w = text_width(&f_small_bold(), en) + 10;
     let tag_h = 14u32;
     c.fill_rect(Rect::new(panel.x + pad_x, top, tag_w, tag_h), C::Black);
     draw_text(
@@ -537,8 +537,7 @@ fn draw_budget(c: &mut Canvas, b: &BudgetData) {
     // Overall bar (red fill)
     let bar = Rect::new(panel.x + pad_x, content_y + 42, panel.w - pad_x as u32 * 2, 8);
     c.stroke_rect(bar, 1, C::Black);
-    if b.cap > 0 {
-        let fill_w = bar.w.saturating_sub(2) * b.spent.min(b.cap) / b.cap;
+    if let Some(fill_w) = (bar.w.saturating_sub(2) * b.spent.min(b.cap)).checked_div(b.cap) {
         c.fill_rect(Rect::new(bar.x + 1, bar.y + 1, fill_w, 6), C::Red);
     }
 
@@ -557,8 +556,7 @@ fn draw_budget(c: &mut Canvas, b: &BudgetData) {
         // Track
         let track = Rect::new(track_x, y + 3, track_w, 6);
         c.stroke_rect(track, 1, C::Black);
-        if cat.cap > 0 {
-            let pct = (cat.spent * 100 / cat.cap).min(100);
+        if let Some(pct) = (cat.spent * 100).checked_div(cat.cap).map(|p| p.min(100)) {
             let fill_w = track.w.saturating_sub(2) * pct / 100;
             let color = if pct > 85 { C::Red } else { C::Black };
             c.fill_rect(Rect::new(track.x + 1, track.y + 1, fill_w, 4), color);
