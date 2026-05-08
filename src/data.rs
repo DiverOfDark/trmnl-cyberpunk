@@ -133,6 +133,30 @@ pub struct DashData {
     pub alerts: Vec<Alert>,
 }
 
+/// Cyberpunk-corpo-PR mottos for the header banner. Cycled per render
+/// using a clock-based index — no `rand` dependency required, and a
+/// once-per-second-changing pick is plenty for a panel that refreshes at
+/// most once per minute.
+pub const MOTTOS: &[&str] = &[
+    "STAY PARANOID. STAY ONLINE.",
+    "WORK. SLEEP. DEPLOY.",
+    "ENCRYPT EVERYTHING. TRUST NOTHING.",
+    "THE NETWORK REMEMBERS.",
+    "NEVER TRUST. ALWAYS VERIFY.",
+    "UPDATES ARE MANDATORY.",
+    "UPTIME IS LIFE.",
+    "THE BACKUP IS YOU.",
+    "PRODUCTIVITY IS PATRIOTISM.",
+    "SLEEP IS A LATENCY ISSUE.",
+    "SILENCE IS COMPLIANCE.",
+    "DATA IS DESTINY.",
+];
+
+pub fn pick_motto() -> &'static str {
+    let idx = chrono::Utc::now().timestamp().unsigned_abs() as usize % MOTTOS.len();
+    MOTTOS[idx]
+}
+
 impl DashData {
     pub fn mock() -> Self {
         let now = Local::now();
@@ -156,7 +180,7 @@ impl DashData {
             time: now.format("%H:%M").to_string(),
             date: format!("{:02} {} {}", now.day(), month, now.year()),
             date_dow: dow.into(),
-            motto: "STAY PARANOID. STAY ONLINE.".into(),
+            motto: pick_motto().into(),
             last_sync: now.format("%H:%M").to_string(),
             next_sync: next.format("%H:%M").to_string(),
             // Mock cluster left as None so the renderer falls back to the
