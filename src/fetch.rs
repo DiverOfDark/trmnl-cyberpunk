@@ -48,7 +48,10 @@ impl Sources {
     pub fn from_env() -> Self {
         Self {
             client: Client::builder()
-                .timeout(Duration::from_secs(10))
+                // 30 s — Outlook/Office365 published-calendar endpoints can
+                // take 10–20 s to respond on cold cache, and timing out on
+                // a single feed leaves us with stale data on the panel.
+                .timeout(Duration::from_secs(30))
                 // Outlook published-calendar endpoints (and a few other ICS
                 // hosts) refuse the default reqwest user-agent and respond
                 // with TLS-level resets that surface here as a bare
@@ -567,17 +570,21 @@ impl Sources {
 
         let now   = Local::now();
         let month = format!("{}-{:02}", now.year(), now.month());
+        let month_start = format!("{:04}-{:02}-01", now.year(), now.month());
 
-        let month_data: Value = get_json(
-            &self.client,
-            &format!(
-                "{}/budgets/{}/months/{}",
-                self.actualbudget_url, self.actualbudget_sync_id, month,
-            ),
-            &self.actualbudget_key,
-            &self.actualbudget_password,
-        )
-        .await?;
+        // Fetch the month aggregate and the per-category transaction counts
+        // in parallel. The transaction counts feed our fixed/variable
+        // classifier (≤ 2 transactions in the month → fixed-cost envelope).
+        let month_url = format!(
+            "{}/budgets/{}/months/{}",
+            self.actualbudget_url, self.actualbudget_sync_id, month,
+        );
+        let (month_r, txn_counts_r) = tokio::join!(
+            get_json(&self.client, &month_url, &self.actualbudget_key, &self.actualbudget_password),
+            self.transaction_counts_by_category(&month_start),
+        );
+        let month_data: Value = month_r?;
+        let tx_counts: HashMap<String, u32> = txn_counts_r.unwrap_or_default();
 
         let cats_raw = month_data["data"]["categoryGroups"]
             .as_array()
@@ -592,16 +599,23 @@ impl Sources {
         for group in &cats_raw {
             if let Some(cat_list) = group["categories"].as_array() {
                 for cat in cat_list {
+                    let id    = cat["id"].as_str().unwrap_or("");
                     let name  = cat["name"].as_str().unwrap_or("?");
                     let spent = (cat["spent"].as_f64().unwrap_or(0.0).abs() / 100.0).round() as u32;
                     let cap   = (cat["budgeted"].as_f64().unwrap_or(0.0) / 100.0).round() as u32;
                     if cap > 0 || spent > 0 {
                         total_spent += spent;
                         total_cap   += cap;
+                        let count = tx_counts.get(id).copied().unwrap_or(0);
                         cats.push(BudgetCat {
-                            label: name.chars().take(5).collect::<String>().to_uppercase(),
+                            label: name.to_string(),
                             spent,
                             cap,
+                            // ≤ 2 transactions in the month is the heuristic
+                            // for "fixed cost". Empty (count == 0) is also
+                            // treated as fixed — a no-spend month for an
+                            // envelope shouldn't read as overpace.
+                            is_fixed: count <= 2,
                         });
                     }
                 }
@@ -609,13 +623,72 @@ impl Sources {
         }
 
         // Keep top 5 by cap
+        // The renderer triages and ranks; pass everything through and let
+        // it pick what to display.
         cats.sort_by_key(|c| std::cmp::Reverse(c.cap));
-        cats.truncate(5);
 
         let months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
         let month_label = format!("{} '{}", months[(now.month()-1) as usize], &now.format("%Y").to_string()[2..]);
 
         Ok(BudgetData { month_label, spent: total_spent, cap: total_cap, cats })
+    }
+
+    /// Run an ActualQL query that groups transactions by category for the
+    /// current month, returning a `category_id → count` map. Used to
+    /// classify envelopes as fixed (≤ 2 transactions) vs variable. If the
+    /// query fails for any reason, the caller should treat it as "no
+    /// data" and fall back to all-variable — better to over-warn than
+    /// silently mis-classify.
+    async fn transaction_counts_by_category(&self, since: &str) -> Result<HashMap<String, u32>> {
+        let url = format!(
+            "{}/budgets/{}/run-query",
+            self.actualbudget_url, self.actualbudget_sync_id,
+        );
+        // ActualQL: select category for every transaction since the start
+        // of the current month. We count rows per category client-side,
+        // which is simpler than wrestling with `calculate: { $count: ... }`
+        // syntax variants.
+        let body = serde_json::json!({
+            "ActualQLquery": {
+                "table": "transactions",
+                "filter": { "date": { "$gte": since } },
+                "select": ["category"],
+            }
+        });
+        let mut req = self.client
+            .post(&url)
+            .header("x-api-key", &self.actualbudget_key)
+            .json(&body);
+        if !self.actualbudget_password.is_empty() {
+            req = req.header("budget-encryption-password", &self.actualbudget_password);
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            let snippet: String = text.chars().take(200).collect();
+            return Err(anyhow!("{url} → {status}: {snippet}"));
+        }
+        let v: Value = serde_json::from_str(&text).map_err(|e| {
+            let snippet: String = text.chars().take(200).collect();
+            anyhow!("{url} → JSON: {e}; body: {snippet}")
+        })?;
+
+        let mut out: HashMap<String, u32> = HashMap::new();
+        // The response shape is `{ "data": [...] }` but `data` may be a
+        // bare array or wrapped further depending on Actual's version;
+        // accept either.
+        let rows = v["data"]
+            .as_array()
+            .or_else(|| v["data"]["data"].as_array());
+        if let Some(rows) = rows {
+            for row in rows {
+                if let Some(cat) = row["category"].as_str() {
+                    *out.entry(cat.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -671,21 +744,34 @@ fn parse_ical_events(content: &str, today: NaiveDate) -> Vec<AgendaItem> {
         let summary    = ical_field(block, "SUMMARY").unwrap_or_default();
         let categories = ical_field_value(block, "CATEGORIES").unwrap_or_default();
         let Some((tzid, dtstart)) = ical_dtstart(block) else { continue };
+        let rrule_value = ical_field_value(block, "RRULE").unwrap_or_default();
 
         if summary.is_empty() || dtstart.is_empty() {
             continue;
         }
 
-        let Some((start_local, all_day)) = parse_ical_dtstart(&dtstart, tzid.as_deref()) else { continue };
-        if start_local.date_naive() != today {
+        // Two cases:
+        //   - No RRULE: a single occurrence; check it's today.
+        //   - RRULE: expand the recurrence and pick out occurrences that
+        //     land within today's local-date range.
+        let occurrences: Vec<(chrono::DateTime<Local>, bool)> = if rrule_value.is_empty() {
+            match parse_ical_dtstart(&dtstart, tzid.as_deref()) {
+                Some((local, all_day)) if local.date_naive() == today => vec![(local, all_day)],
+                _ => Vec::new(),
+            }
+        } else {
+            // All-day-ness is preserved from the original DTSTART form
+            // (date-only `YYYYMMDD` vs `YYYYMMDDTHHMMSS[Z]`).
+            let all_day = !dtstart.contains('T');
+            expand_rrule_for_day(&dtstart, tzid.as_deref(), &rrule_value, today)
+                .into_iter()
+                .map(|dt| (dt, all_day))
+                .collect()
+        };
+
+        if occurrences.is_empty() {
             continue;
         }
-
-        let time = if all_day {
-            "ALL".to_string()
-        } else {
-            start_local.format("%H:%M").to_string()
-        };
 
         let tag = if !categories.is_empty() {
             categories.split(',').next().unwrap_or("").trim()
@@ -694,10 +780,92 @@ fn parse_ical_events(content: &str, today: NaiveDate) -> Vec<AgendaItem> {
             "PERS".to_string()
         };
 
-        items.push(AgendaItem { time, title: summary, tag });
+        for (start_local, all_day) in occurrences {
+            let time = if all_day {
+                "ALL".to_string()
+            } else {
+                start_local.format("%H:%M").to_string()
+            };
+            items.push(AgendaItem {
+                time,
+                title: summary.clone(),
+                tag: tag.clone(),
+            });
+        }
     }
 
     items
+}
+
+/// Expand an RRULE-recurring event and pick the occurrences that fall on
+/// `today` in local time. Returns (datetime, is_all_day) pairs.
+///
+/// We translate Outlook-shaped Windows TZIDs to IANA names first; the
+/// `rrule` crate uses `chrono-tz` and won't accept "W. Europe Standard Time"
+/// directly. If parsing fails we silently return empty — better to miss a
+/// recurring event than to drop the whole feed.
+fn expand_rrule_for_day(
+    dtstart_value: &str,
+    tzid: Option<&str>,
+    rrule_value: &str,
+    today: NaiveDate,
+) -> Vec<chrono::DateTime<Local>> {
+    use chrono::TimeZone;
+
+    // Resolve the calendar timezone for both the DTSTART and the day-window
+    // we'll expand against. Default to Local when no TZID was given.
+    let resolved_tz: Option<chrono_tz::Tz> = tzid.and_then(|t| {
+        t.parse::<chrono_tz::Tz>().ok()
+            .or_else(|| crate::windows_tz::windows_to_iana(t).and_then(|n| n.parse().ok()))
+    });
+
+    // Build the canonical DTSTART line for the rrule parser.
+    let dtstart_line = match (resolved_tz, dtstart_value.ends_with('Z')) {
+        (Some(tz), _) => format!("DTSTART;TZID={}:{}", tz.name(), dtstart_value.trim_end_matches('Z')),
+        (None, true)  => format!("DTSTART:{}", dtstart_value),
+        (None, false) => format!("DTSTART:{}", dtstart_value),
+    };
+    let combined = format!("{dtstart_line}\nRRULE:{rrule_value}");
+    let Ok(rrule_set) = combined.parse::<rrule::RRuleSet>() else {
+        return Vec::new();
+    };
+
+    // Bracket today in the resolved timezone (or local). `all_between` wants
+    // `chrono::DateTime<rrule::Tz>`, so convert via the local-date naive.
+    let day_start_naive = today.and_hms_opt(0, 0, 0).unwrap_or_default();
+    let day_end_naive   = today
+        .succ_opt()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .unwrap_or_default();
+    let (day_start, day_end) = match resolved_tz {
+        Some(tz) => {
+            let s = tz.from_local_datetime(&day_start_naive).single();
+            let e = tz.from_local_datetime(&day_end_naive).single();
+            match (s, e) {
+                (Some(s), Some(e)) => (s.with_timezone(&rrule::Tz::UTC), e.with_timezone(&rrule::Tz::UTC)),
+                _ => return Vec::new(),
+            }
+        }
+        None => {
+            let s = Local.from_local_datetime(&day_start_naive).single();
+            let e = Local.from_local_datetime(&day_end_naive).single();
+            match (s, e) {
+                (Some(s), Some(e)) => (s.with_timezone(&rrule::Tz::UTC), e.with_timezone(&rrule::Tz::UTC)),
+                _ => return Vec::new(),
+            }
+        }
+    };
+
+    // rrule 0.14 doesn't expose `all_between`; we narrow the set with
+    // `.after/.before` and then materialize, capping at 50 occurrences as
+    // a sanity bound.
+    let windowed = rrule_set.after(day_start).before(day_end);
+    let result = windowed.all(50);
+    let dates: Vec<chrono::DateTime<rrule::Tz>> = result.dates;
+    dates
+        .into_iter()
+        .map(|dt| dt.with_timezone(&Local))
+        .collect()
 }
 
 fn ical_field(block: &str, key: &str) -> Option<String> {
@@ -803,6 +971,60 @@ fn parse_ical_dtstart(value: &str, tzid: Option<&str>) -> Option<(chrono::DateTi
         let date = NaiveDate::parse_from_str(v, "%Y%m%d").ok()?;
         let dt = date.and_hms_opt(0, 0, 0)?;
         Some((Local.from_local_datetime(&dt).single()?, true))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Daily recurring meeting that started 2 days ago should appear today.
+    #[test]
+    fn rrule_daily_appears_today() {
+        let today = Local::now().date_naive();
+        let dtstart_value = format!(
+            "{}T100000Z",
+            (today - chrono::Duration::days(2)).format("%Y%m%d"),
+        );
+        let occurrences =
+            expand_rrule_for_day(&dtstart_value, None, "FREQ=DAILY", today);
+        assert_eq!(occurrences.len(), 1, "expected exactly one occurrence today");
+        assert_eq!(occurrences[0].date_naive(), today);
+    }
+
+    /// Weekly meeting that should hit today exactly when today is on the
+    /// recurrence weekday.
+    #[test]
+    fn rrule_weekly_byday_today() {
+        use chrono::{Datelike, Weekday};
+        let today = Local::now().date_naive();
+        let day = match today.weekday() {
+            Weekday::Mon => "MO",
+            Weekday::Tue => "TU",
+            Weekday::Wed => "WE",
+            Weekday::Thu => "TH",
+            Weekday::Fri => "FR",
+            Weekday::Sat => "SA",
+            Weekday::Sun => "SU",
+        };
+        let dtstart_value = format!(
+            "{}T090000Z",
+            (today - chrono::Duration::days(7)).format("%Y%m%d"),
+        );
+        let rule = format!("FREQ=WEEKLY;BYDAY={day}");
+        let occurrences = expand_rrule_for_day(&dtstart_value, None, &rule, today);
+        assert!(!occurrences.is_empty(), "expected weekly recurrence to land today");
+    }
+
+    /// Daily series that ended yesterday should NOT appear today.
+    #[test]
+    fn rrule_until_excludes_after_end() {
+        let today = Local::now().date_naive();
+        let yesterday = today - chrono::Duration::days(1);
+        let dtstart_value = format!("{}T100000Z", (today - chrono::Duration::days(10)).format("%Y%m%d"));
+        let rule = format!("FREQ=DAILY;UNTIL={}T235959Z", yesterday.format("%Y%m%d"));
+        let occurrences = expand_rrule_for_day(&dtstart_value, None, &rule, today);
+        assert!(occurrences.is_empty(), "ended series shouldn't appear");
     }
 }
 

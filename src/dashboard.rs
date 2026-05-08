@@ -11,6 +11,7 @@
 //!   - section headers: helvB10 / helvB12
 //!   - hero numbers ($1842, 14°): logisoso variants
 
+use chrono::Datelike;
 use embedded_graphics::geometry::Point;
 
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
@@ -730,51 +731,161 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
         return;
     };
 
-    let pad_x = 10;
-    // Hero total
-    let total = format!("${}", b.spent);
-    draw_text(c, &f_huge_bold(), &total, panel.x + pad_x, content_y + 22, C::Black, Align::Left);
-    // Subtext
-    let sub = format!("/ ${} · {}", b.cap, b.month_label);
-    draw_text(c, &f_small(), &sub, panel.x + pad_x, content_y + 36, C::Black, Align::Left);
+    let pad_x = 10i32;
 
-    // Overall bar (red fill)
-    let bar = Rect::new(panel.x + pad_x, content_y + 42, panel.w - pad_x as u32 * 2, 8);
+    // ── Hero: $ remaining + month + days/runway ──
+    let remaining: i32 = b.cap as i32 - b.spent as i32;
+    let hero = if remaining >= 0 {
+        format!("${remaining}")
+    } else {
+        format!("-${}", -remaining)
+    };
+    let hero_color = if remaining >= 0 { C::Black } else { C::Red };
+    draw_text(c, &f_huge_bold(), &hero, panel.x + pad_x, content_y + 22, hero_color, Align::Left);
+    // "LEFT" suffix to the right of the hero number.
+    let hero_w = text_width(&f_huge_bold(), &hero) as i32;
+    let suffix = if remaining >= 0 { "LEFT" } else { "OVER" };
+    draw_text(c, &f_small_bold(), suffix, panel.x + pad_x + hero_w + 6, content_y + 22, hero_color, Align::Left);
+    // Right-aligned month label on the same line.
+    draw_text(c, &f_small(), &b.month_label, panel.right() - pad_x, content_y + 22, C::Black, Align::Right);
+
+    // Days remaining + average $/day to keep pace.
+    let now = chrono::Local::now();
+    let dim = days_in_month(now.year(), now.month());
+    let day = now.day();
+    let days_left = dim.saturating_sub(day) + 1; // today still counts
+    let month_pct = if dim == 0 { 0.0 } else { day as f32 / dim as f32 };
+    let per_day = if days_left == 0 { 0 } else { remaining.max(0) as u32 / days_left.max(1) };
+    draw_text(
+        c,
+        &f_small(),
+        &format!("{days_left}D LEFT · ${per_day}/D AVG"),
+        panel.x + pad_x,
+        content_y + 36,
+        C::Black,
+        Align::Left,
+    );
+
+    // ── Overall progress bar ──
+    let bar = Rect::new(panel.x + pad_x, content_y + 42, (panel.w as i32 - pad_x * 2) as u32, 6);
     c.stroke_rect(bar, 1, C::Black);
     if let Some(fill_w) = (bar.w.saturating_sub(2) * b.spent.min(b.cap)).checked_div(b.cap) {
-        c.fill_rect(Rect::new(bar.x + 1, bar.y + 1, fill_w, 6), C::Red);
+        c.fill_rect(Rect::new(bar.x + 1, bar.y + 1, fill_w, 4), C::Red);
     }
 
-    // Category rows: label · track · spent
-    let cats_y = content_y + 58;
-    let row_h = 14i32;
-    let label_w = 40u32;
-    let value_w = 38u32;
-    let track_x = panel.x + pad_x + label_w as i32 + 4;
-    let track_w = panel.w - pad_x as u32 * 2 - label_w - value_w - 8;
-    for (i, cat) in b.cats.iter().take(5).enumerate() {
-        let y = cats_y + (i as i32) * row_h;
-        // Label
-        draw_text(c, &f_small_bold(), &cat.label, panel.x + pad_x, y + 9, C::Black, Align::Left);
-
-        // Track
-        let track = Rect::new(track_x, y + 3, track_w, 6);
-        c.stroke_rect(track, 1, C::Black);
-        if let Some(pct) = (cat.spent * 100).checked_div(cat.cap).map(|p| p.min(100)) {
-            let fill_w = track.w.saturating_sub(2) * pct / 100;
-            let color = if pct > 85 { C::Red } else { C::Black };
-            c.fill_rect(Rect::new(track.x + 1, track.y + 1, fill_w, 4), color);
+    // ── Triage: classify each variable envelope by pace ──
+    //
+    // pace = (spent/cap) / (day/days_in_month)
+    //   ≥ 1.2  → OVERPACE (spending faster than the month is passing)
+    //   < 1.2  → ON TRACK
+    // Fixed envelopes (autodetected via ≤ 2 transactions/month in the
+    // fetcher) skip the pace check entirely — they're paid in lumps and
+    // would always read as "overpace" otherwise.
+    struct Triaged<'a> { cat: &'a BudgetCat, pace: f32 }
+    let mut overpace: Vec<Triaged> = Vec::new();
+    let mut on_track_count = 0u32;
+    let mut on_track_left: i64 = 0;
+    let mut fixed_count = 0u32;
+    let mut fixed_remaining: i64 = 0;
+    for cat in &b.cats {
+        if cat.cap == 0 { continue; }
+        let cat_left = cat.cap as i64 - cat.spent as i64;
+        if cat.is_fixed {
+            fixed_count += 1;
+            fixed_remaining += cat_left.max(0);
+            continue;
         }
-        // Value
+        let pace = if month_pct > 0.0 {
+            (cat.spent as f32 / cat.cap as f32) / month_pct
+        } else { 0.0 };
+        if pace >= 1.2 {
+            overpace.push(Triaged { cat, pace });
+        } else {
+            on_track_count += 1;
+            on_track_left += cat_left.max(0);
+        }
+    }
+    overpace.sort_by(|a, b| b.pace.partial_cmp(&a.pace).unwrap_or(std::cmp::Ordering::Equal));
+
+    // ── OVERPACE list (rendered in available space) ──
+    let row_h = 12i32;
+    let header_y = content_y + 58;
+    // Reserve last 26 px for the two summary lines.
+    let summary_top = panel.bottom() - 4 - row_h * 2;
+    let list_top = header_y + row_h;
+    let max_overpace = (((summary_top - list_top) / row_h).max(0) as usize).min(overpace.len());
+
+    if !overpace.is_empty() {
         draw_text(
             c,
-            &f_small(),
-            &format!("${}", cat.spent),
-            panel.right() - pad_x,
-            y + 9,
-            C::Black,
-            Align::Right,
+            &f_small_bold(),
+            &format!("OVERPACE ({})", overpace.len()),
+            panel.x + pad_x,
+            header_y + 9,
+            C::Red,
+            Align::Left,
         );
+        for (i, t) in overpace.iter().take(max_overpace).enumerate() {
+            let y = list_top + i as i32 * row_h;
+            let label = clip_to_chars(&t.cat.label, 8);
+            draw_text(c, &f_small(), &label, panel.x + pad_x, y + 9, C::Black, Align::Left);
+            // "1.8x" pace marker
+            draw_text(
+                c,
+                &f_small_bold(),
+                &format!("{:.1}x", t.pace),
+                panel.x + pad_x + 56,
+                y + 9,
+                C::Red,
+                Align::Left,
+            );
+            // "$30/100" — remaining/cap, right-aligned
+            let cat_left = (t.cat.cap as i64 - t.cat.spent as i64).max(0);
+            draw_text(
+                c,
+                &f_small(),
+                &format!("${cat_left}/{}", t.cat.cap),
+                panel.right() - pad_x,
+                y + 9,
+                C::Black,
+                Align::Right,
+            );
+        }
+    } else {
+        draw_text(c, &f_small_bold(), "ALL ON PACE", panel.x + pad_x, header_y + 9, C::Green, Align::Left);
+    }
+
+    // ── Two summary lines pinned to bottom ──
+    let s1 = format!("ON TRACK ({on_track_count}): ${on_track_left} LEFT");
+    let s2 = if fixed_remaining == 0 {
+        format!("FIXED    ({fixed_count}): PAID")
+    } else {
+        format!("FIXED    ({fixed_count}): ${fixed_remaining} PENDING")
+    };
+    draw_text(c, &f_small(), &s1, panel.x + pad_x, summary_top + 9,             C::Black, Align::Left);
+    draw_text(c, &f_small(), &s2, panel.x + pad_x, summary_top + 9 + row_h,     C::Black, Align::Left);
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    let next_first = if month == 12 {
+        chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1)
+    } else {
+        chrono::NaiveDate::from_ymd_opt(year, month + 1, 1)
+    };
+    let this_first = chrono::NaiveDate::from_ymd_opt(year, month, 1);
+    match (next_first, this_first) {
+        (Some(n), Some(t)) => (n - t).num_days() as u32,
+        _ => 30,
+    }
+}
+
+fn clip_to_chars(s: &str, max_chars: usize) -> String {
+    let upper = s.to_uppercase();
+    let count = upper.chars().count();
+    if count <= max_chars {
+        upper
+    } else {
+        upper.chars().take(max_chars).collect()
     }
 }
 

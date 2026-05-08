@@ -71,9 +71,17 @@ pub struct Task {
 
 #[derive(Clone, Serialize)]
 pub struct BudgetCat {
+    /// Full category name (no truncation). The renderer truncates for
+    /// display; keeping the full name here lets clients (and future logic
+    /// like fixed-category detection) match without ambiguity.
     pub label: String,
     pub spent: u32,
     pub cap: u32,
+    /// `true` if this envelope behaves like a fixed cost (rent, subscription) —
+    /// detected as ≤2 transactions in the current month. Fixed envelopes
+    /// don't trigger overpace alerts when they hit 100% early in the month.
+    #[serde(default)]
+    pub is_fixed: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -192,11 +200,16 @@ impl DashData {
                 spent: 1842,
                 cap: 2600,
                 cats: vec![
-                    BudgetCat { label: "RENT".into(),  spent: 980, cap: 980  },
-                    BudgetCat { label: "FOOD".into(),  spent: 312, cap: 500  },
-                    BudgetCat { label: "INFRA".into(), spent: 187, cap: 250  },
-                    BudgetCat { label: "TRANS".into(), spent:  94, cap: 200  },
-                    BudgetCat { label: "MISC".into(),  spent: 269, cap: 670  },
+                    // Mock mix: a fixed envelope (rent paid in full),
+                    // an overpace one (food at 1.5× pace assuming mid-month),
+                    // and some on-track ones — exercises every branch.
+                    BudgetCat { label: "Rent".into(),       spent: 980, cap: 980, is_fixed: true  },
+                    BudgetCat { label: "Internet".into(),    spent: 50,  cap: 50,  is_fixed: true  },
+                    BudgetCat { label: "Food".into(),        spent: 412, cap: 500, is_fixed: false },
+                    BudgetCat { label: "Shisha".into(),      spent: 180, cap: 200, is_fixed: false },
+                    BudgetCat { label: "Infrastructure".into(), spent: 80, cap: 250, is_fixed: false },
+                    BudgetCat { label: "Transit".into(),     spent:  94, cap: 200, is_fixed: false },
+                    BudgetCat { label: "Misc".into(),        spent:  46, cap: 420, is_fixed: false },
                 ],
             }),
             alerts: vec![
