@@ -37,19 +37,21 @@ struct DeviceState {
 
 #[derive(Clone)]
 struct AppState {
-    png_cache: Arc<RwLock<Vec<u8>>>,
     device_state: Arc<RwLock<DeviceState>>,
     data: Arc<RwLock<DashData>>,
     sources: Arc<Sources>,
-    render_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Dedupes concurrent upstream-fetch runs. The render itself is per-
+    /// request (no cache) so this only guards `refresh_data`.
+    fetch_lock: Arc<tokio::sync::Mutex<()>>,
     /// Unix epoch (seconds) of the last successful render. Bumped on every
-    /// regenerate; embedded into `/api/display` URLs as a cache-buster
+    /// PNG render; embedded into `/api/display` URLs as a cache-buster
     /// (`dashboard-{epoch}.png`) so the firmware skips its 24h dedupe and
-    /// fetches the new bytes whenever the image content has actually changed.
+    /// re-fetches when the image has changed.
     last_render_at: Arc<RwLock<i64>>,
     /// Externally-pushed task list (via `PUT /api/tasks`). Lives outside
-    /// `data` so a background fetch doesn't overwrite it. `regenerate`
-    /// overlays this onto `DashData.tasks` before rendering.
+    /// `data` so a background fetch doesn't overwrite it. `refresh_data`
+    /// overlays this onto `DashData.tasks`, and per-request `render_now`
+    /// also picks up the latest pushed list.
     tasks: Arc<RwLock<Vec<Task>>>,
     local_mode: bool,
 }
@@ -102,11 +104,14 @@ fn build_display_response(epoch: i64) -> DisplayResponse {
         .with_refresh_rate(refresh_secs())
 }
 
-// ── Rendering ─────────────────────────────────────────────────────────────────
+// ── Data refresh ──────────────────────────────────────────────────────────────
 
-async fn regenerate(state: &AppState) {
-    let Ok(_guard) = state.render_lock.try_lock() else {
-        info!("render already in progress, skipping");
+/// Pull from every configured upstream and stash the result in `state.data`.
+/// Concurrent runs are deduped via `fetch_lock`. No rendering happens here —
+/// renders are per-request in `serve_png` / `render_now`.
+async fn refresh_data(state: &AppState) {
+    let Ok(_guard) = state.fetch_lock.try_lock() else {
+        info!("fetch already in progress, skipping");
         return;
     };
 
@@ -116,26 +121,27 @@ async fn regenerate(state: &AppState) {
     } else {
         state.sources.fetch(&mock).await
     };
-    // Overlay externally-pushed tasks onto the freshly-fetched data so the
-    // render reflects the latest `PUT /api/tasks` push.
     fresh.tasks = state.tasks.read().await.clone();
-    *state.data.write().await = fresh.clone();
+    *state.data.write().await = fresh;
+    info!("data refreshed");
+}
 
+/// Render the current `state.data` to a PNG. Called per-request from
+/// `serve_png`, and once at the end of `RENDER_TO=...` mode. Bumps
+/// `last_render_at` on success so the `/api/display` URL is cache-busted.
+async fn render_now(state: &AppState) -> anyhow::Result<Vec<u8>> {
+    let mut data = state.data.read().await.clone();
+    data.refresh_clock();
+    data.tasks = state.tasks.read().await.clone();
     let device = state.device_state.read().await.clone();
-    let png = tokio::task::spawn_blocking(move || {
-        dashboard::render(&fresh, device.battery_pct, device.rssi)
-    })
-    .await;
 
-    match png {
-        Ok(Ok(bytes)) => {
-            *state.png_cache.write().await = bytes;
-            *state.last_render_at.write().await = chrono::Utc::now().timestamp();
-            info!("dashboard regenerated");
-        }
-        Ok(Err(e)) => warn!("render failed: {e}"),
-        Err(e)     => warn!("render task panicked: {e}"),
-    }
+    let bytes = tokio::task::spawn_blocking(move || {
+        dashboard::render(&data, device.battery_pct, device.rssi)
+    })
+    .await??;
+
+    *state.last_render_at.write().await = chrono::Utc::now().timestamp();
+    Ok(bytes)
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -165,7 +171,7 @@ async fn api_display(State(state): State<AppState>, device: DeviceInfo) -> Json<
 
     // Trigger async re-render so the new battery/signal shows on next refresh
     let s = state.clone();
-    tokio::spawn(async move { regenerate(&s).await });
+    tokio::spawn(async move { refresh_data(&s).await });
 
     let epoch = *state.last_render_at.read().await;
     Json(build_display_response(epoch))
@@ -223,7 +229,7 @@ async fn put_tasks(
     // Re-render in the background so the new list reaches the panel on the
     // device's next poll without forcing the caller to wait for it.
     let s = state.clone();
-    tokio::spawn(async move { regenerate(&s).await });
+    tokio::spawn(async move { refresh_data(&s).await });
     StatusCode::NO_CONTENT
 }
 
@@ -273,45 +279,23 @@ async fn api_data(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn serve_png(State(state): State<AppState>) -> Response {
-    // Always render fresh — no in-memory cache between requests. Upstream
-    // data is whatever the most recent scheduled `regenerate` fetched, but
-    // the clock/motto and pushed-task list update per request so the panel
-    // never returns stale time or stale tasks.
-    let mut data = state.data.read().await.clone();
-    data.refresh_clock();
-    data.tasks = state.tasks.read().await.clone();
-    let device = state.device_state.read().await.clone();
-
-    let png = tokio::task::spawn_blocking(move || {
-        dashboard::render(&data, device.battery_pct, device.rssi)
-    })
-    .await;
-
-    match png {
-        Ok(Ok(bytes)) => {
-            // Bump last_render_at so the cache-buster URL on the next
-            // /api/display response reflects this render.
-            *state.last_render_at.write().await = chrono::Utc::now().timestamp();
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "no-cache")],
-                bytes,
-            )
-                .into_response()
-        }
-        Ok(Err(e)) => {
+    // Always render fresh — no in-memory cache between requests.
+    match render_now(&state).await {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "no-cache")],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => {
             warn!("render failed: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, "render failed").into_response()
-        }
-        Err(e) => {
-            warn!("render task panicked: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "render task panicked").into_response()
         }
     }
 }
 
 async fn force_refresh(State(state): State<AppState>) -> impl IntoResponse {
-    regenerate(&state).await;
+    refresh_data(&state).await;
     Json(json!({ "status": "ok" }))
 }
 
@@ -372,11 +356,10 @@ async fn main() {
     initial_data.tasks.clear();
 
     let state = AppState {
-        png_cache:      Arc::new(RwLock::new(Vec::new())),
         device_state:   Arc::new(RwLock::new(DeviceState::default())),
         data:           Arc::new(RwLock::new(initial_data)),
         sources:        Arc::new(Sources::from_env()),
-        render_lock:    Arc::new(tokio::sync::Mutex::new(())),
+        fetch_lock:     Arc::new(tokio::sync::Mutex::new(())),
         last_render_at: Arc::new(RwLock::new(0)),
         tasks:          Arc::new(RwLock::new(Vec::new())),
         local_mode,
@@ -401,32 +384,34 @@ async fn main() {
         .with_state(state.clone());
 
     if let Some(path) = render_to {
-        // Run the server just long enough for a single in-process screenshot.
-        let server = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        // Yield so the listener is actively accepting before Chrome connects.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // No server needed for one-shot render — fetch (or skip if local
+        // mode) then render directly.
         info!("rendering one frame to {path} (mock data)");
-        regenerate(&state).await;
-        let bytes = state.png_cache.read().await.clone();
-        if bytes.is_empty() {
-            eprintln!("render produced no bytes — see warnings above");
-            std::process::exit(1);
-        }
+        refresh_data(&state).await;
+        let bytes = match render_now(&state).await {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("render failed: {e}");
+                std::process::exit(1);
+            }
+        };
         std::fs::write(&path, &bytes).expect("write png");
         info!("wrote {} bytes to {path}", bytes.len());
-        server.abort();
+        // Drop the bound listener — it was reserved early to claim the port
+        // but `RENDER_TO` exits before serving any traffic.
+        drop(listener);
         return;
     }
 
-    // Background render loop — first render fires after server is ready.
+    // Background data refresh — fires once at startup and on `REFRESH_SECS`
+    // intervals after that. No render here; the PNG is rendered fresh on
+    // every device fetch.
     let bg = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let secs = refresh_secs() as u64;
         loop {
-            regenerate(&bg).await;
+            refresh_data(&bg).await;
             tokio::time::sleep(Duration::from_secs(secs)).await;
         }
     });
