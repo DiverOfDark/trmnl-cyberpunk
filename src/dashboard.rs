@@ -597,32 +597,34 @@ fn draw_agenda(c: &mut Canvas, items: &[AgendaItem]) {
         return;
     }
 
-    // Render as many events as fit between the section header and the
-    // panel bottom; each row is `row_h` tall.
-    let row_h = 28i32;
+    // Compact list: helvR08 / helvB08 at ~14 px row height, ~12 events fit.
+    // Layout per row:
+    //   [HH:MM]  TITLE......................  [DURATION]
+    //   bold,    regular,                       small,
+    //   30 px    middle, ellipsized              40 px right-aligned
+    let row_h = 14i32;
     let bottom_pad = 4i32;
     let avail = (panel.bottom() - bottom_pad - content_y).max(0);
     let max_rows = ((avail / row_h) as usize).min(items.len());
 
-    let title_x = panel.x + pad_x + 56;
-    let title_max_w = (panel.right() - pad_x - title_x).max(0) as u32;
+    let time_x = panel.x + pad_x;
+    let title_x = time_x + 36;
+    let dur_right = panel.right() - pad_x;
+    // Reserve duration band only when at least one row will use it; sized
+    // to fit "1h30m". Title ellipsizes against the dur column's left edge.
+    let dur_w = 40i32;
+    let title_max_w = (dur_right - dur_w - title_x - 4).max(0) as u32;
 
     for (i, ev) in items.iter().take(max_rows).enumerate() {
         let y = content_y + (i as i32) * row_h;
-
-        // Time — red on the first (next-up) event so it stands out.
         let time_color = if i == 0 { C::Red } else { C::Black };
-        draw_text(c, &f_lg_bold(), &ev.time, panel.x + pad_x, y + 14, time_color, Align::Left);
+        draw_text(c, &f_small_bold(), &ev.time, time_x, y + 9, time_color, Align::Left);
 
-        // Title fills the full remaining row width — the category-pill
-        // column was dropped because most calendar feeds don't populate
-        // CATEGORIES, so it was always just "PERS" stealing space.
-        let title = clip_to_width(&f_body(), &ev.title, title_max_w);
-        draw_text(c, &f_body(), &title, title_x, y + 13, C::Black, Align::Left);
+        let title = clip_to_width(&f_small(), &ev.title, title_max_w);
+        draw_text(c, &f_small(), &title, title_x, y + 9, C::Black, Align::Left);
 
-        // Dashed divider between rows (skip last visible)
-        if i + 1 < max_rows {
-            c.dashed_hline(panel.x + pad_x, y + row_h - 2, panel.w - pad_x as u32 * 2, C::Black, 3, 3);
+        if !ev.duration.is_empty() {
+            draw_text(c, &f_small(), &ev.duration, dur_right, y + 9, C::Black, Align::Right);
         }
     }
 }

@@ -57,6 +57,10 @@ pub struct AgendaItem {
     pub time: String,
     pub title: String,
     pub tag: String,
+    /// Pre-formatted meeting duration ("30m", "1h", "1h30m"). Empty for
+    /// all-day events or when the source ICS didn't supply DTEND/DURATION.
+    #[serde(default)]
+    pub duration: String,
 }
 
 /// One row in the OPS panel's task list. Pushed via `PUT /api/tasks` from an
@@ -193,10 +197,10 @@ impl DashData {
                 ],
             }),
             agenda: vec![
-                AgendaItem { time: "15:30".into(), title: "Standup // k3s infra".into(), tag: "WORK".into() },
-                AgendaItem { time: "17:00".into(), title: "Replace UPS battery".into(),  tag: "LAB".into()  },
-                AgendaItem { time: "19:00".into(), title: "Dinner w/ A.".into(),          tag: "PERS".into() },
-                AgendaItem { time: "21:30".into(), title: "Rotate cert-mgr certs".into(), tag: "OPS".into()  },
+                AgendaItem { time: "15:30".into(), title: "Standup // k3s infra".into(), tag: "WORK".into(), duration: "30m".into() },
+                AgendaItem { time: "17:00".into(), title: "Replace UPS battery".into(),  tag: "LAB".into(),  duration: "1h".into()  },
+                AgendaItem { time: "19:00".into(), title: "Dinner w/ A.".into(),          tag: "PERS".into(), duration: "2h".into()  },
+                AgendaItem { time: "21:30".into(), title: "Rotate cert-mgr certs".into(), tag: "OPS".into(),  duration: "45m".into() },
             ],
             tasks: vec![
                 Task { text: "Patch muspelheimr · Talos 1.8".into(),  done: false, priority: "HI".into()  },

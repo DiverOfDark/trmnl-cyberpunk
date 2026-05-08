@@ -810,6 +810,16 @@ fn parse_ical_events(content: &str, today: NaiveDate) -> Vec<AgendaItem> {
         let categories = ical_field_value(block, "CATEGORIES").unwrap_or_default();
         let Some((tzid, dtstart)) = ical_dtstart(block) else { continue };
         let rrule_value = ical_field_value(block, "RRULE").unwrap_or_default();
+        // Duration: prefer DURATION (PT1H30M etc.); fall back to DTEND −
+        // DTSTART. Empty when neither is supplied or for all-day events.
+        let duration_str = ical_field_value(block, "DURATION").unwrap_or_default();
+        let dtend_value = ical_dtend(block).unwrap_or_default();
+        let duration_minutes = compute_duration_minutes(
+            &duration_str,
+            &dtstart,
+            &dtend_value,
+            tzid.as_deref(),
+        );
 
         if summary.is_empty() || dtstart.is_empty() {
             continue;
@@ -851,10 +861,16 @@ fn parse_ical_events(content: &str, today: NaiveDate) -> Vec<AgendaItem> {
             } else {
                 start_local.format("%H:%M").to_string()
             };
+            let duration = if all_day {
+                String::new()
+            } else {
+                duration_minutes.map(format_duration).unwrap_or_default()
+            };
             items.push(AgendaItem {
                 time,
                 title: summary.clone(),
                 tag: tag.clone(),
+                duration,
             });
         }
     }
@@ -1000,6 +1016,107 @@ fn ical_dtstart(block: &str) -> Option<(Option<String>, String)> {
         }
     }
     None
+}
+
+/// Same shape as `ical_dtstart` but for `DTEND`. Used for duration math
+/// when the event lacks an explicit `DURATION` field.
+fn ical_dtend(block: &str) -> Option<String> {
+    for line in block.lines() {
+        if let Some(rest) = line.strip_prefix("DTEND:") {
+            return Some(rest.to_string());
+        }
+        if let Some(rest) = line.strip_prefix("DTEND;") {
+            let colon = rest.find(':')?;
+            return Some(rest[colon + 1..].to_string());
+        }
+    }
+    None
+}
+
+/// Resolve event duration to whole minutes from either an explicit
+/// `DURATION` field (`PT1H30M`, `P1DT2H`, `PT45M`, etc.) or `DTEND −
+/// DTSTART` when both are parseable. `None` if neither yields a value.
+fn compute_duration_minutes(
+    duration_str: &str,
+    dtstart_value: &str,
+    dtend_value: &str,
+    tzid: Option<&str>,
+) -> Option<u32> {
+    if let Some(m) = parse_iso8601_duration_minutes(duration_str) {
+        return Some(m);
+    }
+    if dtend_value.is_empty() {
+        return None;
+    }
+    let start = parse_ical_dtstart(dtstart_value, tzid)?.0;
+    let end = parse_ical_dtstart(dtend_value, tzid)?.0;
+    let secs = (end - start).num_seconds();
+    if secs <= 0 { return None; }
+    Some((secs / 60) as u32)
+}
+
+/// Minimal ISO 8601 duration parser, scoped to the forms iCalendar emits:
+/// `P[nD]T[nH][nM][nS]` and the `P[nD]` shorthand. Years/months are not
+/// supported (they're nominally allowed but every calendar I've seen
+/// emits days+time only for VEVENT durations).
+fn parse_iso8601_duration_minutes(s: &str) -> Option<u32> {
+    let s = s.trim();
+    if s.is_empty() { return None; }
+    let s = s.strip_prefix('-').unwrap_or(s);
+    let mut rest = s.strip_prefix('P')?;
+    let mut total_min: u32 = 0;
+
+    // Optional days component before 'T'.
+    if let Some(t_pos) = rest.find('T') {
+        let day_part = &rest[..t_pos];
+        if let Some(d_pos) = day_part.find('D') {
+            let n: u32 = day_part[..d_pos].parse().ok()?;
+            total_min = total_min.saturating_add(n * 24 * 60);
+        }
+        rest = &rest[t_pos + 1..];
+    } else if let Some(d_pos) = rest.find('D') {
+        let n: u32 = rest[..d_pos].parse().ok()?;
+        return Some(n * 24 * 60);
+    }
+
+    // Time part: H, M, S separators in order.
+    let mut buf = String::new();
+    for c in rest.chars() {
+        match c {
+            '0'..='9' => buf.push(c),
+            'H' => {
+                let n: u32 = buf.parse().ok()?;
+                total_min = total_min.saturating_add(n * 60);
+                buf.clear();
+            }
+            'M' => {
+                let n: u32 = buf.parse().ok()?;
+                total_min = total_min.saturating_add(n);
+                buf.clear();
+            }
+            'S' => {
+                // Round seconds to nearest minute, but only if there were
+                // no minutes/hours provided (rare — ICS rarely lists
+                // sub-minute granularity).
+                let _: u32 = buf.parse().ok()?;
+                buf.clear();
+            }
+            _ => return None,
+        }
+    }
+    Some(total_min)
+}
+
+/// "75" → "1h15m"; "45" → "45m"; "120" → "2h". Compact, fixed-width-ish.
+fn format_duration(minutes: u32) -> String {
+    let h = minutes / 60;
+    let m = minutes % 60;
+    match (h, m) {
+        (0, 0) => String::new(),
+        (0, m) => format!("{m}m"),
+        (h, 0) => format!("{h}h"),
+        (h, m) => format!("{h}h{m}m"),
+    }
 }
 
 fn parse_ical_dtstart(value: &str, tzid: Option<&str>) -> Option<(chrono::DateTime<Local>, bool)> {
