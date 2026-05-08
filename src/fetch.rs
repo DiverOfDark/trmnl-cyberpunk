@@ -5,7 +5,7 @@ use anyhow::{anyhow, Result};
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Utc, Weekday};
 use reqwest::Client;
 use serde_json::Value;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::data::*;
 
@@ -99,45 +99,43 @@ impl Sources {
             self.agenda(),
         );
 
-        // Per-section dispatch:
-        //   Ok(data)              → use real data
-        //   Err(NotConfigured)    → integration opted out; show empty/None
-        //                            instead of mock so the dashboard stays
-        //                            honest about what isn't wired up
-        //   Err(other)            → integration is configured but the
-        //                            request failed; mock fallback so a
-        //                            transient outage doesn't blank the
-        //                            panel (and we log the actual error)
-        let hosts = match hosts_r {
-            Ok(h) => h,
-            Err(e) if is_not_configured(&e) => Vec::new(),
-            Err(e) => { warn!("hosts fetch failed: {e:#}"); mock.hosts.clone() }
-        };
+        // Per-section dispatch (no mock fallback — mock data only shows up
+        // via LOCAL_MODE / RENDER_TO, never as a side-effect of a fetch
+        // failure, so the panel never lies about which integrations are
+        // working):
+        //   Ok(data)              → real data
+        //   Err(NotConfigured)    → empty / None, silent (opted out)
+        //   Err(other)            → empty / None, with a warn so the
+        //                            failure is visible in logs
+        fn warn_unless_unconfigured(label: &str, e: &anyhow::Error) {
+            if !is_not_configured(e) {
+                warn!("{label} fetch failed: {e:#}");
+            }
+        }
+        let hosts = hosts_r.unwrap_or_else(|e| {
+            warn_unless_unconfigured("hosts", &e);
+            Vec::new()
+        });
         let cluster = match cluster_r {
             Ok(c) => Some(c),
-            Err(e) if is_not_configured(&e) => None,
-            Err(e) => { warn!("cluster fetch failed: {e:#}"); mock.cluster.clone() }
+            Err(e) => { warn_unless_unconfigured("cluster", &e); None }
         };
         let weather = match weather_r {
             Ok(w) => Some(w),
-            Err(e) if is_not_configured(&e) => None,
-            Err(e) => { warn!("weather fetch failed: {e:#}"); Some(mock.weather.clone().unwrap_or_default()) }
+            Err(e) => { warn_unless_unconfigured("weather", &e); None }
         };
-        let alerts = match alerts_r {
-            Ok(a) => a,
-            Err(e) if is_not_configured(&e) => Vec::new(),
-            Err(e) => { warn!("alerts fetch failed: {e:#}"); mock.alerts.clone() }
-        };
+        let alerts = alerts_r.unwrap_or_else(|e| {
+            warn_unless_unconfigured("alerts", &e);
+            Vec::new()
+        });
         let budget = match budget_r {
             Ok(b) => Some(b),
-            Err(e) if is_not_configured(&e) => None,
-            Err(e) => { warn!("budget fetch failed: {e:#}"); mock.budget.clone() }
+            Err(e) => { warn_unless_unconfigured("budget", &e); None }
         };
-        let agenda = match agenda_r {
-            Ok(a) => a,
-            Err(e) if is_not_configured(&e) => Vec::new(),
-            Err(e) => { warn!("agenda fetch failed: {e:#}"); mock.agenda.clone() }
-        };
+        let agenda = agenda_r.unwrap_or_else(|e| {
+            warn_unless_unconfigured("agenda", &e);
+            Vec::new()
+        });
 
         let now = Local::now();
         let months = [
@@ -246,7 +244,10 @@ impl Sources {
         if self.prometheus.is_empty() {
             return Err(NotConfigured("PROMETHEUS_URL").into());
         }
-        let (cpu_r, temp_r, ram_r, disk_r, uptime_r, l1_r, l5_r, l15_r, uname_r) = tokio::join!(
+        let (
+            cpu_r, temp_r, ram_r, disk_r, uptime_r, l1_r, l5_r, l15_r, uname_r,
+            ram_used_r, ram_total_r,
+        ) = tokio::join!(
             prom_query(&self.client, &self.prometheus,
                 r#"100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)"#),
             prom_query(&self.client, &self.prometheus,
@@ -267,6 +268,11 @@ impl Sources {
                 &self.client, &self.prometheus,
                 "node_uname_info", "nodename",
             ),
+            // Per-host RAM in bytes — used to render "1.6G/16G" in the
+            // detail rows where absolute usage reads better than %.
+            prom_query(&self.client, &self.prometheus,
+                "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes"),
+            prom_query(&self.client, &self.prometheus, "node_memory_MemTotal_bytes"),
         );
 
         let cpu_map    = to_map(cpu_r.unwrap_or_default());
@@ -278,6 +284,8 @@ impl Sources {
         let l5_map     = to_map(l5_r.unwrap_or_default());
         let l15_map    = to_map(l15_r.unwrap_or_default());
         let uname_map: HashMap<String, String> = uname_r.unwrap_or_default().into_iter().collect();
+        let ram_used_map  = to_map(ram_used_r.unwrap_or_default());
+        let ram_total_map = to_map(ram_total_r.unwrap_or_default());
 
         // Union of all known instances (prefer uptime as the canonical set)
         let mut hosts_set: std::collections::BTreeSet<String> =
@@ -294,10 +302,13 @@ impl Sources {
             .into_iter()
             .map(|key| {
                 let display_name = uname_map.get(&key).cloned().unwrap_or_else(|| key.clone());
+                const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
                 HostData {
                     cpu:         cpu_map.get(&key).copied().unwrap_or(0.0).round() as u8,
                     cpu_temp:    temp_map.get(&key).copied().unwrap_or(0.0).round() as u8,
                     ram_pct:     ram_map.get(&key).copied().unwrap_or(0.0).round() as u8,
+                    ram_used_gib:  (ram_used_map.get(&key).copied().unwrap_or(0.0) / GIB) as f32,
+                    ram_total_gib: (ram_total_map.get(&key).copied().unwrap_or(0.0) / GIB) as f32,
                     disk_pct:    disk_map.get(&key).copied().unwrap_or(0.0).round() as u8,
                     uptime_days: uptime_map.get(&key).copied().unwrap_or(0.0) as u32,
                     load: [
@@ -343,8 +354,20 @@ impl Sources {
             ),
         );
 
+        // If every sub-query failed, propagate the failure to the parent
+        // so the panel renders as unavailable instead of falsely reading
+        // "0% / 0% / 0%" — that's mock-shaped data dressed up as real.
+        if cpu_r.is_err() && ram_r.is_err() && disk_r.is_err() {
+            return Err(cpu_r.err()
+                .or_else(|| ram_r.err())
+                .or_else(|| disk_r.err())
+                .unwrap_or_else(|| anyhow!("all cluster queries failed")));
+        }
+
         // Each query returns a single scalar wrapped in a Vec; pick the
-        // first sample if present, default to 0 if nothing came back.
+        // first sample if present, default to 0 only when the *individual*
+        // metric is missing (Ceph not deployed, no nodes, etc.) while at
+        // least one other metric did come through.
         let pick = |r: Result<Vec<(String, f64)>>| -> f64 {
             r.ok()
                 .and_then(|v| v.into_iter().next())
@@ -510,18 +533,44 @@ impl Sources {
     }
 }
 
-/// Render an error and its `source()` chain on a single line so we can see
-/// the *actual* cause (TLS handshake failure, connect refused, etc.) instead
-/// of just reqwest's outermost "error sending request" wrapper.
-fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
-    let mut out = e.to_string();
-    let mut current = e.source();
-    while let Some(cause) = current {
-        out.push_str(" → ");
-        out.push_str(&cause.to_string());
-        current = cause.source();
+
+// ── Retry helper ──────────────────────────────────────────────────────────
+
+/// Run an async operation up to `attempts` times with simple exponential
+/// backoff (1 s, 2 s, 4 s …). Used to ride out transient 5xx / timeout
+/// errors from upstream services that recover on their own — actual-http-api
+/// occasionally returns a generic 500 when its sync session needs to
+/// re-authenticate, and Outlook published-calendar URLs sometimes hit our
+/// 30 s read timeout on a cold cache.
+async fn with_retry<F, Fut, T>(label: &str, attempts: u32, mut op: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut last_err: Option<anyhow::Error> = None;
+    let total = attempts.max(1);
+    for attempt in 1..=total {
+        match op().await {
+            Ok(v) => {
+                if attempt > 1 {
+                    info!("{label} succeeded on attempt {attempt}");
+                }
+                return Ok(v);
+            }
+            Err(e) => {
+                if attempt < total {
+                    let backoff = Duration::from_secs(1u64 << (attempt - 1));
+                    warn!(
+                        "{label} attempt {attempt}/{total} failed: {e:#}; retrying in {}s",
+                        backoff.as_secs(),
+                    );
+                    tokio::time::sleep(backoff).await;
+                }
+                last_err = Some(e);
+            }
+        }
     }
-    out
+    Err(last_err.expect("retry loop ran ≥ 1 attempt"))
 }
 
 // ── ActualBudget HTTP API ─────────────────────────────────────────────────
@@ -533,27 +582,34 @@ fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
 /// `encryption_password` is sent as `budget-encryption-password` when non-empty;
 /// it's required on the first request against an end-to-end encrypted budget
 /// and harmless on unencrypted ones.
+///
+/// Wrapped in `with_retry` so a transient 5xx (the actual-http-api wrapper
+/// emits "Unknown error while interacting with Actual Api" when its sync
+/// session needs to re-auth) doesn't blank the panel for an hour.
 async fn get_json(
     client: &Client,
     url: &str,
     api_key: &str,
     encryption_password: &str,
 ) -> Result<Value> {
-    let mut req = client.get(url).header("x-api-key", api_key);
-    if !encryption_password.is_empty() {
-        req = req.header("budget-encryption-password", encryption_password);
-    }
-    let resp = req.send().await?;
-    let status = resp.status();
-    let body = resp.text().await?;
-    if !status.is_success() {
-        let snippet: String = body.chars().take(200).collect();
-        return Err(anyhow!("{url} → {status}: {snippet}"));
-    }
-    serde_json::from_str(&body).map_err(|e| {
-        let snippet: String = body.chars().take(200).collect();
-        anyhow!("{url} → JSON decode failed ({e}); body starts: {snippet}")
+    with_retry(&format!("GET {url}"), 3, || async {
+        let mut req = client.get(url).header("x-api-key", api_key);
+        if !encryption_password.is_empty() {
+            req = req.header("budget-encryption-password", encryption_password);
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        let body = resp.text().await?;
+        if !status.is_success() {
+            let snippet: String = body.chars().take(200).collect();
+            return Err(anyhow!("{url} → {status}: {snippet}"));
+        }
+        serde_json::from_str(&body).map_err(|e| {
+            let snippet: String = body.chars().take(200).collect();
+            anyhow!("{url} → JSON decode failed ({e}); body starts: {snippet}")
+        })
     })
+    .await
 }
 
 impl Sources {
@@ -655,24 +711,27 @@ impl Sources {
                 "select": ["category"],
             }
         });
-        let mut req = self.client
-            .post(&url)
-            .header("x-api-key", &self.actualbudget_key)
-            .json(&body);
-        if !self.actualbudget_password.is_empty() {
-            req = req.header("budget-encryption-password", &self.actualbudget_password);
-        }
-        let resp = req.send().await?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            let snippet: String = text.chars().take(200).collect();
-            return Err(anyhow!("{url} → {status}: {snippet}"));
-        }
-        let v: Value = serde_json::from_str(&text).map_err(|e| {
-            let snippet: String = text.chars().take(200).collect();
-            anyhow!("{url} → JSON: {e}; body: {snippet}")
-        })?;
+        let v: Value = with_retry(&format!("POST {url}"), 3, || async {
+            let mut req = self.client
+                .post(&url)
+                .header("x-api-key", &self.actualbudget_key)
+                .json(&body);
+            if !self.actualbudget_password.is_empty() {
+                req = req.header("budget-encryption-password", &self.actualbudget_password);
+            }
+            let resp = req.send().await?;
+            let status = resp.status();
+            let text = resp.text().await?;
+            if !status.is_success() {
+                let snippet: String = text.chars().take(200).collect();
+                return Err(anyhow!("{url} → {status}: {snippet}"));
+            }
+            serde_json::from_str(&text).map_err(|e| {
+                let snippet: String = text.chars().take(200).collect();
+                anyhow!("{url} → JSON: {e}; body: {snippet}")
+            })
+        })
+        .await?;
 
         let mut out: HashMap<String, u32> = HashMap::new();
         // The response shape is `{ "data": [...] }` but `data` may be a
@@ -705,8 +764,14 @@ impl Sources {
             let client = self.client.clone();
             let url = url.clone();
             async move {
-                let body = client.get(&url).send().await?.text().await?;
-                Ok::<_, reqwest::Error>(body)
+                // 3 attempts handle the most common Outlook failure mode:
+                // a cold cache 504/timeout that succeeds on a retry.
+                let label = format!("ICS {url}");
+                with_retry(&label, 3, || async {
+                    let body = client.get(&url).send().await?.text().await?;
+                    Ok::<_, anyhow::Error>(body)
+                })
+                .await
             }
         });
         let results = futures::future::join_all(fetches).await;
@@ -715,7 +780,7 @@ impl Sources {
         for (url, r) in self.ics_urls.iter().zip(results) {
             match r {
                 Ok(body) => items.extend(parse_ical_events(&body, today)),
-                Err(e) => warn!("ics fetch failed for {url}: {}", error_chain(&e)),
+                Err(e) => warn!("ics fetch failed for {url}: {e:#}"),
             }
         }
 

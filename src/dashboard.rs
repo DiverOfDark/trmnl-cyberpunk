@@ -25,25 +25,25 @@ use crate::render::{Canvas, Rect, C};
 // Each constant is a function to dodge u8g2-fonts' generic API.
 
 fn f_body() -> FontRenderer {
-    FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvR10_tf>()
+    FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvR10_te>()
 }
 fn f_body_bold() -> FontRenderer {
-    FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvB10_tf>()
+    FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvB10_te>()
 }
 fn f_small() -> FontRenderer {
-    FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvR08_tf>()
+    FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvR08_te>()
 }
 fn f_small_bold() -> FontRenderer {
-    FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvB08_tf>()
+    FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvB08_te>()
 }
 fn f_lg_bold() -> FontRenderer {
-    FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvB14_tf>()
+    FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvB14_te>()
 }
 fn f_xl_bold() -> FontRenderer {
-    FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvB18_tf>()
+    FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvB18_te>()
 }
 fn f_huge_bold() -> FontRenderer {
-    FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvB24_tf>()
+    FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvB24_te>()
 }
 fn f_temperature() -> FontRenderer {
     // logisoso is a tall futuristic display face; _tn variant has digits + a
@@ -693,29 +693,42 @@ fn draw_sys(c: &mut Canvas, hosts: &[HostData], cluster: Option<&ClusterMetrics>
     let row_h = 14i32;
     let max_rows = 6.min(hosts.len());
 
-    // Column anchors: NAME (left), CPU/TMP/RAM/DSK (right-aligned in 4 evenly
-    // spaced bands). Right-aligning numbers makes scanning a column
-    // ("which node is hottest?") easy.
+    // Three right-aligned columns: CPU% | RAM "1.6G/16G" | TMP°.
+    // DSK is dropped from per-host rows because in k8s the per-node `/`
+    // filesystem is the container rootfs and reads as 0% — useless. The
+    // cluster's Ceph DSK still appears in the summary cells above.
     let cols_right_edge = panel.right() - pad_x;
-    let col_w = 38i32; // ~"100%" + margin
-    let cols_left_edge = cols_right_edge - col_w * 4;
+    let cpu_w = 36i32;   // "100%"
+    let ram_w = 78i32;   // "99.9G/999G"
+    let tmp_w = 36i32;   // "99°"
+    let cpu_right = cols_right_edge - tmp_w - ram_w;
+    let ram_right = cols_right_edge - tmp_w;
+    let tmp_right = cols_right_edge;
+    let cols_left_edge = cpu_right - cpu_w;
     let name_max_w = (cols_left_edge - (panel.x + pad_x) - 4).max(40) as u32;
 
     for (i, h) in hosts.iter().take(max_rows).enumerate() {
         let y = list_y + (i as i32) * row_h;
-        // Name (truncate to fit before metric columns)
         let name = clip_to_width(&f_small_bold(), &h.name.to_uppercase(), name_max_w);
         draw_text(c, &f_small_bold(), &name, panel.x + pad_x, y + 9, C::Black, Align::Left);
 
-        // Each metric right-aligned in its own band; > 70% drawn in red.
-        // Column order mirrors the cluster summary row above.
-        let metrics = [h.cpu as u32, h.ram_pct as u32, h.disk_pct as u32, h.cpu_temp as u32];
-        let units = ["%", "%", "%", "°"];
-        for (j, (val, unit)) in metrics.iter().zip(units.iter()).enumerate() {
-            let col_right = cols_left_edge + col_w * (j as i32 + 1);
-            let color = if *val > 70 { C::Red } else { C::Black };
-            draw_text(c, &f_small(), &format!("{val}{unit}"), col_right, y + 9, color, Align::Right);
-        }
+        let cpu_color = if h.cpu > 70 { C::Red } else { C::Black };
+        draw_text(c, &f_small(), &format!("{}%", h.cpu),
+            cpu_right, y + 9, cpu_color, Align::Right);
+
+        // RAM as "<used>G/<total>G" — used has 1 decimal, total without
+        // (the total is almost always a round value like 8 / 16 / 32 / 64).
+        let ram_color = if h.ram_pct > 70 { C::Red } else { C::Black };
+        draw_text(
+            c,
+            &f_small(),
+            &format!("{:.1}G/{:.0}G", h.ram_used_gib, h.ram_total_gib),
+            ram_right, y + 9, ram_color, Align::Right,
+        );
+
+        let tmp_color = if h.cpu_temp > 70 { C::Red } else { C::Black };
+        draw_text(c, &f_small(), &format!("{}°", h.cpu_temp),
+            tmp_right, y + 9, tmp_color, Align::Right);
     }
 }
 
@@ -723,7 +736,7 @@ fn draw_sys(c: &mut Canvas, hosts: &[HostData], cluster: Option<&ClusterMetrics>
 
 fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
     let panel = col3_top();
-    let content_y = draw_section_header(c, panel, "$", "// 04");
+    let content_y = draw_section_header(c, panel, "€", "// 04");
 
     let Some(b) = b else {
         draw_text(c, &f_lg_bold(), "—", panel.x + 10, content_y + 24, C::Black, Align::Left);
@@ -733,12 +746,12 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
 
     let pad_x = 10i32;
 
-    // ── Hero: $ remaining + month + days/runway ──
+    // ── Hero: € remaining + month + days/runway ──
     let remaining: i32 = b.cap as i32 - b.spent as i32;
     let hero = if remaining >= 0 {
-        format!("${remaining}")
+        format!("€{remaining}")
     } else {
-        format!("-${}", -remaining)
+        format!("-€{}", -remaining)
     };
     let hero_color = if remaining >= 0 { C::Black } else { C::Red };
     draw_text(c, &f_huge_bold(), &hero, panel.x + pad_x, content_y + 22, hero_color, Align::Left);
@@ -749,7 +762,7 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
     // Right-aligned month label on the same line.
     draw_text(c, &f_small(), &b.month_label, panel.right() - pad_x, content_y + 22, C::Black, Align::Right);
 
-    // Days remaining + average $/day to keep pace.
+    // Days remaining + average €/day to keep pace.
     let now = chrono::Local::now();
     let dim = days_in_month(now.year(), now.month());
     let day = now.day();
@@ -759,7 +772,7 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
     draw_text(
         c,
         &f_small(),
-        &format!("{days_left}D LEFT · ${per_day}/D AVG"),
+        &format!("{days_left}D LEFT · €{per_day}/D AVG"),
         panel.x + pad_x,
         content_y + 36,
         C::Black,
@@ -839,12 +852,12 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
                 C::Red,
                 Align::Left,
             );
-            // "$30/100" — remaining/cap, right-aligned
+            // "€30/100" — remaining/cap, right-aligned
             let cat_left = (t.cat.cap as i64 - t.cat.spent as i64).max(0);
             draw_text(
                 c,
                 &f_small(),
-                &format!("${cat_left}/{}", t.cat.cap),
+                &format!("€{cat_left}/{}", t.cat.cap),
                 panel.right() - pad_x,
                 y + 9,
                 C::Black,
@@ -856,11 +869,11 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
     }
 
     // ── Two summary lines pinned to bottom ──
-    let s1 = format!("ON TRACK ({on_track_count}): ${on_track_left} LEFT");
+    let s1 = format!("ON TRACK ({on_track_count}): €{on_track_left} LEFT");
     let s2 = if fixed_remaining == 0 {
         format!("FIXED    ({fixed_count}): PAID")
     } else {
-        format!("FIXED    ({fixed_count}): ${fixed_remaining} PENDING")
+        format!("FIXED    ({fixed_count}): €{fixed_remaining} PENDING")
     };
     draw_text(c, &f_small(), &s1, panel.x + pad_x, summary_top + 9,             C::Black, Align::Left);
     draw_text(c, &f_small(), &s2, panel.x + pad_x, summary_top + 9 + row_h,     C::Black, Align::Left);

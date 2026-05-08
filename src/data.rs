@@ -24,6 +24,12 @@ pub struct HostData {
     pub cpu: u8,
     pub cpu_temp: u8,
     pub ram_pct: u8,
+    /// Used RAM in GiB. Rendered alongside total in the per-host detail
+    /// rows ("1.6G/16G") because absolute usage is more actionable than
+    /// the percentage when the cluster mixes hosts of different sizes.
+    pub ram_used_gib: f32,
+    /// Total RAM in GiB.
+    pub ram_total_gib: f32,
     pub disk_pct: u8,
     pub uptime_days: u32,
     pub load: [f32; 3],
@@ -156,18 +162,21 @@ impl DashData {
                 HostData {
                     name: "asgard".into(),
                     cpu: 34, cpu_temp: 58, ram_pct: 62,
+                    ram_used_gib: 9.9, ram_total_gib: 16.0,
                     disk_pct: 47, uptime_days: 142,
                     load: [0.82, 0.74, 0.69],
                 },
                 HostData {
                     name: "muspelheimr".into(),
                     cpu: 71, cpu_temp: 71, ram_pct: 81,
+                    ram_used_gib: 25.9, ram_total_gib: 32.0,
                     disk_pct: 23, uptime_days: 7,
                     load: [1.92, 1.74, 1.55],
                 },
                 HostData {
                     name: "niflheimr".into(),
                     cpu: 12, cpu_temp: 44, ram_pct: 38,
+                    ram_used_gib: 3.0, ram_total_gib: 8.0,
                     disk_pct: 88, uptime_days: 203,
                     load: [0.24, 0.18, 0.21],
                 },

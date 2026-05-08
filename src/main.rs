@@ -263,6 +263,7 @@ async fn api_data(State(state): State<AppState>) -> impl IntoResponse {
         "last_sync": data.last_sync,
         "next_sync": data.next_sync,
         "hosts":     data.hosts,
+        "cluster":  data.cluster,
         "weather":  data.weather,
         "agenda":   data.agenda,
         "tasks":    data.tasks,
