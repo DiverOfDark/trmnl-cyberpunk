@@ -273,13 +273,41 @@ async fn api_data(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn serve_png(State(state): State<AppState>) -> Response {
-    let bytes = state.png_cache.read().await.clone();
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "no-cache")],
-        bytes,
-    )
-        .into_response()
+    // Always render fresh — no in-memory cache between requests. Upstream
+    // data is whatever the most recent scheduled `regenerate` fetched, but
+    // the clock/motto and pushed-task list update per request so the panel
+    // never returns stale time or stale tasks.
+    let mut data = state.data.read().await.clone();
+    data.refresh_clock();
+    data.tasks = state.tasks.read().await.clone();
+    let device = state.device_state.read().await.clone();
+
+    let png = tokio::task::spawn_blocking(move || {
+        dashboard::render(&data, device.battery_pct, device.rssi)
+    })
+    .await;
+
+    match png {
+        Ok(Ok(bytes)) => {
+            // Bump last_render_at so the cache-buster URL on the next
+            // /api/display response reflects this render.
+            *state.last_render_at.write().await = chrono::Utc::now().timestamp();
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "no-cache")],
+                bytes,
+            )
+                .into_response()
+        }
+        Ok(Err(e)) => {
+            warn!("render failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "render failed").into_response()
+        }
+        Err(e) => {
+            warn!("render task panicked: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "render task panicked").into_response()
+        }
+    }
 }
 
 async fn force_refresh(State(state): State<AppState>) -> impl IntoResponse {

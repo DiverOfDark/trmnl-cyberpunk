@@ -157,6 +157,34 @@ pub fn pick_motto() -> &'static str {
 }
 
 impl DashData {
+    /// Re-stamp the clock-derived fields (time, date, motto, sync markers)
+    /// to wall-clock now. Called on every PNG render so the panel shows the
+    /// current time without re-fetching upstream data.
+    pub fn refresh_clock(&mut self) {
+        use chrono::{Datelike, Local, Weekday};
+        let now = Local::now();
+        let months = [
+            "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+            "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+        ];
+        let dow = match now.weekday() {
+            Weekday::Sun => "SUN", Weekday::Mon => "MON", Weekday::Tue => "TUE",
+            Weekday::Wed => "WED", Weekday::Thu => "THU", Weekday::Fri => "FRI",
+            Weekday::Sat => "SAT",
+        };
+        let month = months[(now.month() - 1) as usize];
+        let refresh_secs: i64 = std::env::var("REFRESH_SECS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(3600);
+        let next = now + chrono::Duration::seconds(refresh_secs);
+
+        self.time = now.format("%H:%M").to_string();
+        self.date = format!("{:02} {} {}", now.day(), month, now.year());
+        self.date_dow = dow.into();
+        self.last_sync = now.format("%H:%M").to_string();
+        self.next_sync = next.format("%H:%M").to_string();
+        self.motto = pick_motto().into();
+    }
+
     pub fn mock() -> Self {
         let now = Local::now();
         let months = [
