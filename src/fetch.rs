@@ -487,12 +487,19 @@ impl Sources {
             // Drop the Alertmanager Watchdog heartbeat — it always fires
             // by design, so it's pure noise on the panel.
             .filter(|a| a["labels"]["alertname"].as_str() != Some("Watchdog"))
+            // Drop info-level alerts; the panel only surfaces things that
+            // need attention (warnings + errors).
+            .filter(|a| {
+                matches!(
+                    a["labels"]["severity"].as_str().unwrap_or("info"),
+                    "critical" | "error" | "warning",
+                )
+            })
             .map(|a| {
-                let severity = a["labels"]["severity"].as_str().unwrap_or("info");
+                let severity = a["labels"]["severity"].as_str().unwrap_or("warning");
                 let level = match severity {
                     "critical" | "error" => "ERR",
-                    "warning"            => "WRN",
-                    _                    => "INF",
+                    _                    => "WRN",
                 }.to_string();
 
                 let starts_at = a["startsAt"].as_str().unwrap_or("");
@@ -527,8 +534,8 @@ impl Sources {
             .take(20)
             .collect();
 
-        // Sort: ERR first, then WRN, then INF
-        alerts.sort_by_key(|a| match a.level.as_str() { "ERR" => 0, "WRN" => 1, _ => 2 });
+        // Sort: ERR first, then WRN.
+        alerts.sort_by_key(|a| match a.level.as_str() { "ERR" => 0, _ => 1 });
         Ok(alerts)
     }
 }

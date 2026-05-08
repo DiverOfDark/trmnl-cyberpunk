@@ -228,7 +228,6 @@ impl DashData {
             alerts: vec![
                 Alert { level: "WRN".into(), time: "14:02".into(), message: "muspelheimr cpu_temp 71C > 65".into() },
                 Alert { level: "ERR".into(), time: "13:48".into(), message: "velero backup.daily failed rc=2".into() },
-                Alert { level: "INF".into(), time: "12:00".into(), message: "cert-manager renewed *.lab".into()     },
                 Alert { level: "WRN".into(), time: "09:14".into(), message: "fritzbox wan p95 142ms".into()         },
             ],
         }

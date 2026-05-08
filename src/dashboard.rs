@@ -842,14 +842,15 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
         );
         for (i, t) in overpace.iter().take(max_overpace).enumerate() {
             let y = list_top + i as i32 * row_h;
-            let label = clip_to_chars(&t.cat.label, 8);
+            // 12 chars in helvR08 ≈ 60 px; pace anchor pushed to +78 so the
+            // longest label still has clearance before the "1.8x" marker.
+            let label = clip_to_chars(&t.cat.label, 12);
             draw_text(c, &f_small(), &label, panel.x + pad_x, y + 9, C::Black, Align::Left);
-            // "1.8x" pace marker
             draw_text(
                 c,
                 &f_small_bold(),
                 &format!("{:.1}x", t.pace),
-                panel.x + pad_x + 56,
+                panel.x + pad_x + 78,
                 y + 9,
                 C::Red,
                 Align::Left,
