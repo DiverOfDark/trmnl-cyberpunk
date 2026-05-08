@@ -295,7 +295,7 @@ fn draw_body(c: &mut Canvas, data: &DashData) {
 
     draw_weather(c, data.weather.as_ref());
     draw_agenda(c, &data.agenda);
-    draw_sys(c, &data.hosts);
+    draw_sys(c, &data.hosts, data.cluster.as_ref());
     draw_budget(c, data.budget.as_ref());
     draw_ops(c, &data.tasks, &data.alerts);
 }
@@ -629,28 +629,34 @@ fn draw_agenda(c: &mut Canvas, items: &[AgendaItem]) {
 
 // ── SYS panel ──────────────────────────────────────────────────────────────
 
-fn draw_sys(c: &mut Canvas, hosts: &[HostData]) {
+fn draw_sys(c: &mut Canvas, hosts: &[HostData], cluster: Option<&ClusterMetrics>) {
     let panel = col2_bot();
     let content_y = draw_section_header(c, panel, "SYS", "// 03");
 
-    if hosts.is_empty() {
+    if hosts.is_empty() && cluster.is_none() {
         draw_text(c, &f_small(), "PROMETHEUS_URL NOT SET", panel.x + 12, content_y + 18, C::Black, Align::Left);
         return;
     }
 
-    // Cluster summary: arithmetic means across all hosts. The top row
-    // mirrors the original single-host metric grid so the dominant numbers
-    // ($1842-style) keep their visual prominence; the per-host detail rows
-    // sit below in a compact list.
+    // Cluster summary cells. CPU/RAM/DSK come from the dedicated
+    // cluster-rollup queries when available (sum-based for CPU/RAM, Ceph
+    // for disk); per-host arithmetic mean is the fallback so mock data and
+    // pre-cluster-fetch states still produce a reasonable summary.
+    // Temperature has no useful cluster metric, so it always comes from
+    // the per-host mean.
     let n = hosts.len() as u32;
     let avg = |f: fn(&HostData) -> u32| -> u32 {
-        hosts.iter().map(f).sum::<u32>() / n.max(1)
+        if hosts.is_empty() { 0 } else { hosts.iter().map(f).sum::<u32>() / n.max(1) }
     };
-    let cluster: [(&str, u32, &str); 4] = [
-        ("CPU", avg(|h| h.cpu as u32),      "%"),
-        ("TMP", avg(|h| h.cpu_temp as u32), "°"),
-        ("RAM", avg(|h| h.ram_pct as u32),  "%"),
-        ("DSK", avg(|h| h.disk_pct as u32), "%"),
+    let cluster_cpu = cluster.map(|c| c.cpu_pct as u32).unwrap_or_else(|| avg(|h| h.cpu as u32));
+    let cluster_ram = cluster.map(|c| c.ram_pct as u32).unwrap_or_else(|| avg(|h| h.ram_pct as u32));
+    let cluster_dsk = cluster.map(|c| c.disk_pct as u32).unwrap_or_else(|| avg(|h| h.disk_pct as u32));
+    let cluster_tmp = avg(|h| h.cpu_temp as u32);
+    let cluster_cells: [(&str, u32, &str); 4] = [
+        ("CPU", cluster_cpu, "%"),
+        ("RAM", cluster_ram, "%"),
+        ("DSK", cluster_dsk, "%"),
+        ("TMP", cluster_tmp, "°"),
     ];
 
     let pad_x = 12;
@@ -660,7 +666,7 @@ fn draw_sys(c: &mut Canvas, hosts: &[HostData]) {
     // of the helvB10 label above it (the big digits' ascender otherwise
     // crashes into the label baseline).
     let cell_h = 58u32;
-    for (i, (lbl, val, unit)) in cluster.iter().enumerate() {
+    for (i, (lbl, val, unit)) in cluster_cells.iter().enumerate() {
         let cx = panel.x + pad_x + (i as i32) * (cell_w as i32 + cell_gap);
         let cy = content_y;
         let cell = Rect::new(cx, cy, cell_w, cell_h);
@@ -702,8 +708,9 @@ fn draw_sys(c: &mut Canvas, hosts: &[HostData]) {
         draw_text(c, &f_small_bold(), &name, panel.x + pad_x, y + 9, C::Black, Align::Left);
 
         // Each metric right-aligned in its own band; > 70% drawn in red.
-        let metrics = [h.cpu as u32, h.cpu_temp as u32, h.ram_pct as u32, h.disk_pct as u32];
-        let units = ["%", "°", "%", "%"];
+        // Column order mirrors the cluster summary row above.
+        let metrics = [h.cpu as u32, h.ram_pct as u32, h.disk_pct as u32, h.cpu_temp as u32];
+        let units = ["%", "%", "%", "°"];
         for (j, (val, unit)) in metrics.iter().zip(units.iter()).enumerate() {
             let col_right = cols_left_edge + col_w * (j as i32 + 1);
             let color = if *val > 70 { C::Red } else { C::Black };

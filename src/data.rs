@@ -2,6 +2,22 @@ use chrono::{Datelike, Local};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+/// Cluster-wide rollups that aren't a simple arithmetic mean of per-host
+/// values. CPU and RAM use `sum(consumed) / sum(total)` so a small idle
+/// node doesn't pull the cluster number down. Disk reads from Ceph rather
+/// than node-exporter's `/` filesystem (which is often the container's
+/// rootfs and unhelpful in k8s).
+#[derive(Clone, Default, Serialize)]
+pub struct ClusterMetrics {
+    /// Cluster CPU utilization (0..100).
+    pub cpu_pct: u8,
+    /// Cluster RAM utilization (0..100).
+    pub ram_pct: u8,
+    /// Cluster disk utilization from `ceph_cluster_total_used_bytes /
+    /// ceph_cluster_total_bytes` (0..100).
+    pub disk_pct: u8,
+}
+
 #[derive(Clone, Serialize)]
 pub struct HostData {
     pub name: String,
@@ -84,6 +100,10 @@ pub struct DashData {
     pub last_sync: String,
     pub next_sync: String,
     pub hosts: Vec<HostData>,
+    /// Cluster rollups (CPU/RAM/DSK). `None` falls back to per-host
+    /// arithmetic mean in the renderer so mock data and partial outages
+    /// still produce a reasonable summary.
+    pub cluster: Option<ClusterMetrics>,
     /// `None` when the integration isn't configured (env vars empty);
     /// renderer skips the WX panel body in that case. `Some` when fetched
     /// successfully OR when configured-but-failed (mock fallback).
@@ -121,6 +141,9 @@ impl DashData {
             motto: "STAY PARANOID. STAY ONLINE.".into(),
             last_sync: now.format("%H:%M").to_string(),
             next_sync: next.format("%H:%M").to_string(),
+            // Mock cluster left as None so the renderer falls back to the
+            // per-host arithmetic mean — keeps mock previews unchanged.
+            cluster: None,
             hosts: vec![
                 HostData {
                     name: "asgard".into(),

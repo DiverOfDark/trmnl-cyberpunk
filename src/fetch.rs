@@ -87,8 +87,9 @@ impl Sources {
 
     // Fetch all data concurrently; fall back to mock values per section on error.
     pub async fn fetch(&self, mock: &DashData) -> DashData {
-        let (hosts_r, weather_r, alerts_r, budget_r, agenda_r) = tokio::join!(
+        let (hosts_r, cluster_r, weather_r, alerts_r, budget_r, agenda_r) = tokio::join!(
             self.hosts(),
+            self.cluster(),
             self.weather(),
             self.alerts(),
             self.budget(),
@@ -108,6 +109,11 @@ impl Sources {
             Ok(h) => h,
             Err(e) if is_not_configured(&e) => Vec::new(),
             Err(e) => { warn!("hosts fetch failed: {e:#}"); mock.hosts.clone() }
+        };
+        let cluster = match cluster_r {
+            Ok(c) => Some(c),
+            Err(e) if is_not_configured(&e) => None,
+            Err(e) => { warn!("cluster fetch failed: {e:#}"); mock.cluster.clone() }
         };
         let weather = match weather_r {
             Ok(w) => Some(w),
@@ -153,6 +159,7 @@ impl Sources {
             last_sync: now.format("%H:%M").to_string(),
             next_sync: next.format("%H:%M").to_string(),
             hosts,
+            cluster,
             weather,
             agenda,
             tasks: mock.tasks.clone(),
@@ -301,6 +308,55 @@ impl Sources {
             .collect();
 
         Ok(hosts)
+    }
+
+    /// Cluster-wide rollups for the SYS panel summary cells. Computed via
+    /// dedicated PromQL queries because:
+    ///   - CPU/RAM use `sum(consumed) / sum(total)`, not the arithmetic
+    ///     mean of per-host percentages (a small idle node would otherwise
+    ///     pull the cluster figure down).
+    ///   - Disk reads from Ceph (`ceph_cluster_total_used_bytes /
+    ///     ceph_cluster_total_bytes`) because in k8s the per-node `/`
+    ///     filesystem is the container rootfs and reports near-zero.
+    async fn cluster(&self) -> Result<ClusterMetrics> {
+        if self.prometheus.is_empty() {
+            return Err(NotConfigured("PROMETHEUS_URL").into());
+        }
+        let (cpu_r, ram_r, disk_r) = tokio::join!(
+            prom_query(
+                &self.client,
+                &self.prometheus,
+                r#"100 * (1 - sum(rate(node_cpu_seconds_total{mode="idle"}[5m])) / sum(rate(node_cpu_seconds_total[5m])))"#,
+            ),
+            prom_query(
+                &self.client,
+                &self.prometheus,
+                "100 * (1 - sum(node_memory_MemAvailable_bytes) / sum(node_memory_MemTotal_bytes))",
+            ),
+            prom_query(
+                &self.client,
+                &self.prometheus,
+                "100 * sum(ceph_cluster_total_used_bytes) / sum(ceph_cluster_total_bytes)",
+            ),
+        );
+
+        // Each query returns a single scalar wrapped in a Vec; pick the
+        // first sample if present, default to 0 if nothing came back.
+        let pick = |r: Result<Vec<(String, f64)>>| -> f64 {
+            r.ok()
+                .and_then(|v| v.into_iter().next())
+                .map(|(_, x)| x)
+                .unwrap_or(0.0)
+        };
+        let to_pct = |v: f64| -> u8 {
+            if v.is_nan() || v.is_infinite() { 0 } else { v.clamp(0.0, 100.0).round() as u8 }
+        };
+
+        Ok(ClusterMetrics {
+            cpu_pct:  to_pct(pick(cpu_r)),
+            ram_pct:  to_pct(pick(ram_r)),
+            disk_pct: to_pct(pick(disk_r)),
+        })
     }
 }
 
