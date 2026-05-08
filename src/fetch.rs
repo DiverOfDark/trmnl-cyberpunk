@@ -649,7 +649,8 @@ impl Sources {
         // De-dup by (time, title) — a calendar invited to multiple feeds duplicates.
         items.sort_by(|a, b| a.time.cmp(&b.time).then(a.title.cmp(&b.title)));
         items.dedup_by(|a, b| a.time == b.time && a.title == b.title);
-        items.truncate(6);
+        // Generous fetcher cap; renderer caps to whatever fits the panel.
+        items.truncate(20);
 
         // Empty is a valid result (no meetings today) — return Ok so the
         // parent renders an empty agenda instead of the mock fallback.

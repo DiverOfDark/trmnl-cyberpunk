@@ -595,34 +595,33 @@ fn draw_agenda(c: &mut Canvas, items: &[AgendaItem]) {
         draw_text(c, &f_small(), "NO EVENTS TODAY", panel.x + pad_x, content_y + 18, C::Black, Align::Left);
         return;
     }
-    let row_h = 32i32;
-    for (i, ev) in items.iter().take(4).enumerate() {
+
+    // Render as many events as fit between the section header and the
+    // panel bottom; each row is `row_h` tall.
+    let row_h = 28i32;
+    let bottom_pad = 4i32;
+    let avail = (panel.bottom() - bottom_pad - content_y).max(0);
+    let max_rows = ((avail / row_h) as usize).min(items.len());
+
+    let title_x = panel.x + pad_x + 56;
+    let title_max_w = (panel.right() - pad_x - title_x).max(0) as u32;
+
+    for (i, ev) in items.iter().take(max_rows).enumerate() {
         let y = content_y + (i as i32) * row_h;
 
-        // Time (red for first event)
+        // Time — red on the first (next-up) event so it stands out.
         let time_color = if i == 0 { C::Red } else { C::Black };
-        draw_text(c, &f_lg_bold(), &ev.time, panel.x + pad_x, y + 16, time_color, Align::Left);
+        draw_text(c, &f_lg_bold(), &ev.time, panel.x + pad_x, y + 14, time_color, Align::Left);
 
-        // Title
-        draw_text(c, &f_body(), &ev.title, panel.x + pad_x + 56, y + 14, C::Black, Align::Left);
+        // Title fills the full remaining row width — the category-pill
+        // column was dropped because most calendar feeds don't populate
+        // CATEGORIES, so it was always just "PERS" stealing space.
+        let title = clip_to_width(&f_body(), &ev.title, title_max_w);
+        draw_text(c, &f_body(), &title, title_x, y + 13, C::Black, Align::Left);
 
-        // Tag pill
-        let tag_w = 44u32;
-        let tag_x = panel.right() - pad_x - tag_w as i32;
-        c.fill_rect(Rect::new(tag_x, y + 4, tag_w, 14), C::Black);
-        draw_text(
-            c,
-            &f_small_bold(),
-            &ev.tag,
-            tag_x + tag_w as i32 / 2,
-            y + 14,
-            C::White,
-            Align::Center,
-        );
-
-        // Dashed divider between rows (skip last)
-        if i < items.len().min(4).saturating_sub(1) {
-            c.dashed_hline(panel.x + pad_x, y + row_h, panel.w - pad_x as u32 * 2, C::Black, 3, 3);
+        // Dashed divider between rows (skip last visible)
+        if i + 1 < max_rows {
+            c.dashed_hline(panel.x + pad_x, y + row_h - 2, panel.w - pad_x as u32 * 2, C::Black, 3, 3);
         }
     }
 }
