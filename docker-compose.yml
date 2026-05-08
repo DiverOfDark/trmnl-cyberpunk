@@ -10,12 +10,13 @@ services:
       # Must be reachable from the device — set to your LAN IP.
       BASE_URL: "http://192.168.1.100:8080"
 
-      # How often (seconds) to regenerate the dashboard (default: 3600 = 1h)
+      # How often (seconds) to refetch upstream data and how often the
+      # firmware should poll. The PNG itself is rendered fresh on every
+      # device fetch. Default: 3600 = 1h.
       REFRESH_SECS: "3600"
 
       LISTEN: "0.0.0.0:8080"
       RUST_LOG: "trmnl_cyberpunk=info"
-      CHROME_PATH: "/usr/bin/chromium"
 
       # Prometheus / Alertmanager (leave blank to use mock data)
       PROMETHEUS_URL: ""

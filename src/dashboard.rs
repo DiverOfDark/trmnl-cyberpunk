@@ -1,12 +1,10 @@
 //! Layout & content rendering for the dashboard.
 //!
-//! Pixel coordinates here are the literal sizes from the original HTML/CSS;
-//! see `templates/dashboard.html` for the source of truth. Each panel below
-//! corresponds to one CSS section and is intentionally laid out 1:1 so a
-//! design tweak in one place is easy to mirror in the other.
+//! Pixel-direct: every panel is drawn straight onto the indexed canvas with
+//! `embedded-graphics` primitives + u8g2 bitmap fonts. Coordinates and font
+//! sizes are tuned for the 800×480 Spectra 6-color panel.
 //!
-//! Font choices are u8g2 bitmap fonts (no antialiasing) picked to land close
-//! to the Space-Grotesk-like geometric feel of the HTML version:
+//! Font picks (no antialiasing — the panel can't render it):
 //!   - body text: helvR / helvB (Helvetica) at the matching pixel sizes
 //!   - section headers: helvB10 / helvB12
 //!   - hero numbers ($1842, 14°): logisoso variants
@@ -245,7 +243,7 @@ pub fn draw_header_meta(c: &mut Canvas, battery: u8, rssi: i32) {
     let bar_x0 = right_x - bar_block_w;
     let bar_baseline = baseline; // bars sit on the same baseline as text
     for i in 0..4 {
-        let h = bar_max_h.saturating_sub(0) * (i as u32 + 1) / 4 + 2;
+        let h = bar_max_h * (i as u32 + 1) / 4 + 2;
         let bx = bar_x0 + i * (bar_w as i32 + bar_gap);
         let by = bar_baseline - h as i32;
         let r = Rect::new(bx, by, bar_w, h);
@@ -298,7 +296,7 @@ fn draw_body(c: &mut Canvas, data: &DashData) {
     draw_agenda(c, &data.agenda);
     draw_sys(c, &data.hosts, data.cluster.as_ref());
     draw_budget(c, data.budget.as_ref());
-    draw_ops(c, &data.tasks, &data.alerts);
+    draw_ops(c, &data.alerts);
 }
 
 // ── Section header (the "stamp" with EN tag + // NN seq) ───────────────────
@@ -907,47 +905,21 @@ fn clip_to_chars(s: &str, max_chars: usize) -> String {
 
 // ── OPS panel (tasks + alerts) ─────────────────────────────────────────────
 
-fn draw_ops(c: &mut Canvas, tasks: &[Task], alerts: &[Alert]) {
+fn draw_ops(c: &mut Canvas, alerts: &[Alert]) {
     let panel = col3_bot();
     let content_y = draw_section_header(c, panel, "OPS", "// 05");
 
     let pad_x = 10;
-    let task_h = 14i32;
-    let max_tasks = 4;
-    let task_count = tasks.len().min(max_tasks);
-    for (i, t) in tasks.iter().take(max_tasks).enumerate() {
-        let y = content_y + (i as i32) * task_h;
-        // Checkbox
-        let mark = if t.done { "■" } else { "□" };
-        draw_text(c, &f_small(), mark, panel.x + pad_x, y + 10, C::Black, Align::Left);
-        // Priority
-        let pri_color = if t.priority == "HI" { C::Red } else { C::Black };
-        draw_text(c, &f_small_bold(), &t.priority, panel.x + pad_x + 14, y + 10, pri_color, Align::Left);
-        // Text (truncated visually by clip — we let it render and the right border absorbs overflow)
-        let text = clip_to_width(&f_body(), &t.text, panel.w - pad_x as u32 * 2 - 50);
-        draw_text(c, &f_body(), &text, panel.x + pad_x + 40, y + 10, C::Black, Align::Left);
-    }
-
-    // Alerts area starts just below the rendered tasks (or at the top of
-    // content when tasks is empty), separated by a dashed divider only
-    // when both halves have content.
     let alert_h = 14i32;
-    let alerts_y = if task_count == 0 {
-        content_y
-    } else {
-        let y = content_y + task_count as i32 * task_h + 6;
-        c.dashed_hline(panel.x + pad_x, y, panel.w - pad_x as u32 * 2, C::Black, 3, 3);
-        y + 4
-    };
 
-    // Show as many alerts as fit between alerts_y and the panel bottom
+    // Show as many alerts as fit between content_y and the panel bottom
     // (with a small footer pad). Each row is alert_h tall.
     let bottom_pad = 4i32;
-    let avail = (panel.bottom() - bottom_pad - alerts_y).max(0);
+    let avail = (panel.bottom() - bottom_pad - content_y).max(0);
     let max_alerts = (avail / alert_h).max(0) as usize;
 
     for (i, a) in alerts.iter().take(max_alerts).enumerate() {
-        let y = alerts_y + (i as i32) * alert_h;
+        let y = content_y + (i as i32) * alert_h;
         // Level pill
         let (bg, fg) = match a.level.as_str() {
             "ERR" => (C::Red, C::White),

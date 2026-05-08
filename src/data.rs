@@ -1,6 +1,5 @@
 use chrono::{Datelike, Local};
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use serde::Serialize;
 
 /// Cluster-wide rollups that aren't a simple arithmetic mean of per-host
 /// values. CPU and RAM use `sum(consumed) / sum(total)` so a small idle
@@ -63,22 +62,6 @@ pub struct AgendaItem {
     pub duration: String,
 }
 
-/// One row in the OPS panel's task list. Pushed via `PUT /api/tasks` from an
-/// external service (e.g. an AI agent). `priority == "HI"` is rendered in
-/// red; any other value (typically "MED" / "LOW") is rendered in black.
-/// `done` strikes the row through.
-#[derive(Clone, Serialize, Deserialize, ToSchema)]
-pub struct Task {
-    /// Task description. Strings longer than the panel's column width are
-    /// ellipsized at render time.
-    pub text: String,
-    /// `true` to render the row with a strikethrough.
-    pub done: bool,
-    /// Priority label: "HI" / "MED" / "LOW" (case-sensitive). Unknown
-    /// values render in black like "MED".
-    pub priority: String,
-}
-
 #[derive(Clone, Serialize)]
 pub struct BudgetCat {
     /// Full category name (no truncation). The renderer truncates for
@@ -127,7 +110,6 @@ pub struct DashData {
     /// successfully OR when configured-but-failed (mock fallback).
     pub weather: Option<WeatherData>,
     pub agenda: Vec<AgendaItem>,
-    pub tasks: Vec<Task>,
     /// Same not-configured-vs-mocked-fallback semantics as `weather`.
     pub budget: Option<BudgetData>,
     pub alerts: Vec<Alert>,
@@ -253,13 +235,7 @@ impl DashData {
                 AgendaItem { time: "19:00".into(), title: "Dinner w/ A.".into(),          tag: "PERS".into(), duration: "2h".into()  },
                 AgendaItem { time: "21:30".into(), title: "Rotate cert-mgr certs".into(), tag: "OPS".into(),  duration: "45m".into() },
             ],
-            tasks: vec![
-                Task { text: "Patch muspelheimr · Talos 1.8".into(),  done: false, priority: "HI".into()  },
-                Task { text: "Renew *.lab via cert-manager".into(),    done: true,  priority: "MED".into() },
-                Task { text: "Backup nextcloud → rclone/B2".into(),    done: false, priority: "HI".into()  },
-                Task { text: "Rotate vaultwarden secrets".into(),       done: false, priority: "LOW".into() },
-            ],
-            budget: Some(BudgetData {
+             budget: Some(BudgetData {
                 month_label: format!("{} '{}", month, &now.format("%Y").to_string()[2..]),
                 spent: 1842,
                 cap: 2600,

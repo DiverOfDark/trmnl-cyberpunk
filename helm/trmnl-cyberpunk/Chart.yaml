@@ -1,8 +1,8 @@
 apiVersion: v2
 name: trmnl-cyberpunk
-description: Cyberpunk TRMNL BYOS dashboard — HTML/Chromium rendered, Spectra 6-color e-ink
+description: Cyberpunk TRMNL BYOS dashboard — pixel-direct rendering for the Spectra 6-color e-ink panel
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "0.1.0"
 keywords:
   - trmnl

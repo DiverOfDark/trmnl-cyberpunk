@@ -4,12 +4,11 @@ metadata:
   name: {{ include "trmnl-cyberpunk.fullname" . }}
   labels:
     {{- include "trmnl-cyberpunk.labels" . | nindent 4 }}
-  {{- with .Values.podAnnotations }}
-  annotations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: 1
+  strategy:
+    type: RollingUpdate
   selector:
     matchLabels:
       {{- include "trmnl-cyberpunk.selectorLabels" . | nindent 6 }}
@@ -17,6 +16,9 @@ spec:
     metadata:
       labels:
         {{- include "trmnl-cyberpunk.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- with .Values.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
@@ -46,19 +48,15 @@ spec:
             - configMapRef:
                 name: {{ include "trmnl-cyberpunk.fullname" . }}
             - secretRef:
-                name: {{ include "trmnl-cyberpunk.fullname" . }}
+                name: {{ .Values.existingSecret | default (include "trmnl-cyberpunk.fullname" .) }}
+          {{- with .Values.livenessProbe }}
           livenessProbe:
-            httpGet:
-              path: /health
-              port: http
-            initialDelaySeconds: 5
-            periodSeconds: 30
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
           readinessProbe:
-            httpGet:
-              path: /health
-              port: http
-            initialDelaySeconds: 3
-            periodSeconds: 10
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

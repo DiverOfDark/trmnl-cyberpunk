@@ -145,18 +145,6 @@ impl Canvas {
         self.fill_rect(Rect { x, y, w: 1, h }, c);
     }
 
-    /// Dashed horizontal line: `on` filled px, `off` blank px, repeating.
-    pub fn dashed_hline(&mut self, x: i32, y: i32, w: u32, c: C, on: u32, off: u32) {
-        let period = on + off;
-        if period == 0 { return; }
-        let mut i = 0u32;
-        while i < w {
-            let run = on.min(w - i);
-            self.fill_rect(Rect { x: x + i as i32, y, w: run, h: 1 }, c);
-            i += period;
-        }
-    }
-
     /// Filled left-leaning parallelogram: top edge from (x,y) to (x+w,y),
     /// bottom edge offset by `slant` to the left. Used for the TRMNL-01 tab.
     pub fn fill_left_parallelogram(&mut self, x: i32, y: i32, w: u32, h: u32, slant: u32, c: C) {

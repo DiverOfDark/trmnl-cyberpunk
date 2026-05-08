@@ -3,28 +3,48 @@ replicaCount: 1
 image:
   repository: ghcr.io/diverofdark/trmnl-cyberpunk
   pullPolicy: Always
-  # Overrides the image tag (defaults to Chart.appVersion)
-  tag: ""
+  # Defaults to the rolling `main` tag built by CI on every push. Pin to
+  # a semver (e.g. "0.1.0") for production. Empty string falls back to
+  # Chart.appVersion.
+  tag: "main"
 
 imagePullSecrets: []
+
+# Extra labels applied to the pod template. Useful for things like
+# gethomepage's pod-selector annotation:
+#   podLabels:
+#     app.kubernetes.io/pod: trmnl-cyberpunk
+podLabels: {}
 
 serviceAccount:
   create: false
 
 service:
   type: ClusterIP
-  port: 8080
+  # External port the Service exposes; targetPort is always the container's
+  # 8080. 80 matches the convention of putting an Ingress in front.
+  port: 80
 
 ingress:
   enabled: false
   className: ""
   annotations: {}
+    # cert-manager.io/cluster-issuer: acme-issuer
+    # gethomepage.dev/enabled: "true"
+    # gethomepage.dev/href: "https://trmnl.example.com/dashboard.png"
+    # gethomepage.dev/group: Apps
+    # gethomepage.dev/name: TRMNL Cyberpunk
+    # gethomepage.dev/icon: https://avatars.githubusercontent.com/u/164423030?s=48&v=4
+    # gethomepage.dev/pod-selector: "app.kubernetes.io/pod=trmnl-cyberpunk"
+    # gethomepage.dev/description: "Spectra 6-color e-ink dashboard"
   hosts:
     - host: trmnl.example.com
       paths:
         - path: /
           pathType: Prefix
   tls: []
+    # - hosts: [trmnl.example.com]
+    #   secretName: trmnl-cyberpunk-tls
 
 resources:
   limits:
@@ -34,14 +54,39 @@ resources:
     cpu: 100m
     memory: 128Mi
 
-# Base URL the TRMNL device will use to fetch images — must be reachable from the device.
+# Health probes. Defaults match the manifests previously used in homelab.
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  timeoutSeconds: 5
+  successThreshold: 1
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  successThreshold: 1
+  failureThreshold: 15
+
+# Base URL the TRMNL device will use to fetch images — must be reachable
+# from the device. Behind an Ingress with TLS, set this to the public URL.
 baseUrl: "http://trmnl-cyberpunk:8080"
 
-# How often (seconds) the dashboard image is regenerated and the device is asked to refresh.
+# How often (seconds) upstreams are refetched and how often the firmware
+# is asked to poll. The PNG itself is rendered fresh on every device
+# fetch — this knob does not control render frequency.
 refreshSecs: "3600"
 
-# TRMNL API key returned during /api/setup provisioning.
-trmnlApiKey: "cyberpunk-byos"
+# IANA timezone. Affects `chrono::Local::now()` clock display in the
+# header/footer.
+timezone: "Europe/Berlin"
 
 # ── Live data sources (all optional — falls back to mock data when blank) ──
 
@@ -51,19 +96,69 @@ prometheusUrl: ""
 # Alertmanager API for active alerts.
 alertmanagerUrl: ""
 
-# Nextcloud CalDAV for today's agenda.
-nextcloudUrl: ""
-nextcloudUser: ""
-nextcloudPass: ""   # stored in Secret
-
-# ActualBudget HTTP API sidecar for budget data.
+# ActualBudget HTTP API for budget data.
 actualbudgetUrl: ""
-actualbudgetKey: ""  # stored in Secret
 
 # Open-Meteo weather location (no API key required).
 weatherLat: "52.50"
 weatherLon: "13.33"
 weatherTz: "Europe/Berlin"
+
+# ── Secrets ──────────────────────────────────────────────────────────────
+#
+# Two ways to feed the deployment's `envFrom` Secret:
+#
+#   1. Inline (default). The chart renders a Secret built from the
+#      `secrets.*` values below. Plaintext in your values — fine for dev,
+#      not for prod.
+#
+#   2. Bring your own. Set `existingSecret` to the name of a Secret you
+#      manage out-of-band (ExternalSecret, SealedSecret, kustomize patch,
+#      sops-decrypted manifest, …). The chart's inline Secret is then not
+#      rendered, and the deployment references your Secret by name. Pair
+#      with `additionalObjects` to ship the source manifest alongside the
+#      chart so a single `helm install` is self-contained.
+
+# When set, the chart skips rendering its own Secret and the deployment
+# pulls envFrom from this existing Secret instead. The Secret must
+# contain TRMNL_API_KEY (and any of ICS_URLS / ACTUALBUDGET_KEY /
+# ACTUALBUDGET_SYNC_ID / ACTUALBUDGET_PASSWORD you want non-empty).
+existingSecret: ""
+
+# Inline secret values. Used only when `existingSecret` is empty.
+secrets:
+  trmnlApiKey: "cyberpunk-byos"
+  icsUrls: ""             # comma/semicolon/whitespace-separated list of ICS URLs
+  actualbudgetKey: ""
+  actualbudgetSyncId: ""
+  actualbudgetPassword: ""
+
+# Arbitrary Kubernetes manifests rendered alongside the chart. Each entry
+# is a full object (apiVersion/kind/metadata/spec/...). Templates inside
+# values are evaluated with `tpl`, so `{{ .Release.Name }}` etc. work.
+#
+# Typical use: emit an ExternalSecret or SealedSecret that produces the
+# Secret named in `existingSecret`. Example (ExternalSecret + OpenBao):
+#
+#   existingSecret: trmnl-cyberpunk
+#   additionalObjects:
+#     - apiVersion: external-secrets.io/v1
+#       kind: ExternalSecret
+#       metadata:
+#         name: trmnl-cyberpunk
+#       spec:
+#         secretStoreRef:
+#           name: openbao-store
+#           kind: ClusterSecretStore
+#         refreshInterval: 1h
+#         target:
+#           name: trmnl-cyberpunk
+#         data:
+#           - secretKey: TRMNL_API_KEY
+#             remoteRef:
+#               key: trmnl-cyberpunk
+#               property: api_key
+additionalObjects: []
 
 podAnnotations: {}
 podSecurityContext: {}

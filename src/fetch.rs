@@ -163,7 +163,6 @@ impl Sources {
             cluster,
             weather,
             agenda,
-            tasks: mock.tasks.clone(),
             budget,
             alerts,
         }

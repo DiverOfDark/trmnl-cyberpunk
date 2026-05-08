@@ -7,13 +7,11 @@ metadata:
 data:
   BASE_URL: {{ .Values.baseUrl | quote }}
   REFRESH_SECS: {{ .Values.refreshSecs | quote }}
-  CHROME_PATH: "/usr/bin/chromium"
   LISTEN: "0.0.0.0:8080"
   RUST_LOG: "trmnl_cyberpunk=info"
+  TZ: {{ .Values.timezone | default "Europe/Berlin" | quote }}
   PROMETHEUS_URL: {{ .Values.prometheusUrl | default "" | quote }}
   ALERTMANAGER_URL: {{ .Values.alertmanagerUrl | default "" | quote }}
-  NEXTCLOUD_URL: {{ .Values.nextcloudUrl | default "" | quote }}
-  NEXTCLOUD_USER: {{ .Values.nextcloudUser | default "" | quote }}
   ACTUALBUDGET_URL: {{ .Values.actualbudgetUrl | default "" | quote }}
   WEATHER_LAT: {{ .Values.weatherLat | default "52.50" | quote }}
   WEATHER_LON: {{ .Values.weatherLon | default "13.33" | quote }}

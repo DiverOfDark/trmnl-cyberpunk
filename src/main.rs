@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use axum::{
     extract::State,
-    http::{header, HeaderMap, StatusCode},
+    http::{header, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
@@ -19,10 +19,8 @@ use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 use trmnl::{DeviceInfo, DisplayResponse};
-use utoipa::OpenApi;
-use utoipa_swagger_ui::SwaggerUi;
 
-use data::{DashData, Task};
+use data::DashData;
 use fetch::Sources;
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -48,11 +46,6 @@ struct AppState {
     /// (`dashboard-{epoch}.png`) so the firmware skips its 24h dedupe and
     /// re-fetches when the image has changed.
     last_render_at: Arc<RwLock<i64>>,
-    /// Externally-pushed task list (via `PUT /api/tasks`). Lives outside
-    /// `data` so a background fetch doesn't overwrite it. `refresh_data`
-    /// overlays this onto `DashData.tasks`, and per-request `render_now`
-    /// also picks up the latest pushed list.
-    tasks: Arc<RwLock<Vec<Task>>>,
     local_mode: bool,
 }
 
@@ -116,12 +109,11 @@ async fn refresh_data(state: &AppState) {
     };
 
     let mock = DashData::mock();
-    let mut fresh = if state.local_mode {
+    let fresh = if state.local_mode {
         mock
     } else {
         state.sources.fetch(&mock).await
     };
-    fresh.tasks = state.tasks.read().await.clone();
     *state.data.write().await = fresh;
     info!("data refreshed");
 }
@@ -132,7 +124,6 @@ async fn refresh_data(state: &AppState) {
 async fn render_now(state: &AppState) -> anyhow::Result<Vec<u8>> {
     let mut data = state.data.read().await.clone();
     data.refresh_clock();
-    data.tasks = state.tasks.read().await.clone();
     let device = state.device_state.read().await.clone();
 
     let bytes = tokio::task::spawn_blocking(move || {
@@ -189,95 +180,6 @@ async fn api_log(State(_): State<AppState>, device: DeviceInfo, body: String) ->
     StatusCode::NO_CONTENT
 }
 
-/// Get the current OPS task list as it will appear on the panel.
-#[utoipa::path(
-    get,
-    path = "/api/tasks",
-    responses(
-        (status = 200, description = "Current task list", body = Vec<Task>),
-    ),
-    tag = "tasks",
-)]
-async fn get_tasks(State(state): State<AppState>) -> Json<Vec<Task>> {
-    Json(state.tasks.read().await.clone())
-}
-
-/// Replace the OPS task list. Accepts a JSON array of tasks; the panel
-/// re-renders with the new list within a few seconds. If the `API_TOKEN`
-/// env var is set on the server, requests must include
-/// `Authorization: Bearer <token>`.
-#[utoipa::path(
-    put,
-    path = "/api/tasks",
-    request_body = Vec<Task>,
-    responses(
-        (status = 204, description = "Task list replaced; re-render scheduled"),
-        (status = 401, description = "API_TOKEN is configured and the bearer token is missing or wrong"),
-    ),
-    security(("bearer" = [])),
-    tag = "tasks",
-)]
-async fn put_tasks(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(tasks): Json<Vec<Task>>,
-) -> StatusCode {
-    if !check_token(&headers) {
-        return StatusCode::UNAUTHORIZED;
-    }
-    *state.tasks.write().await = tasks;
-    // Re-render in the background so the new list reaches the panel on the
-    // device's next poll without forcing the caller to wait for it.
-    let s = state.clone();
-    tokio::spawn(async move { refresh_data(&s).await });
-    StatusCode::NO_CONTENT
-}
-
-/// If `API_TOKEN` is set and non-empty, require an `Authorization: Bearer
-/// <token>` header that matches. Empty / unset env var = open access.
-fn check_token(headers: &HeaderMap) -> bool {
-    let Ok(token) = std::env::var("API_TOKEN") else { return true };
-    if token.is_empty() { return true; }
-    let expected = format!("Bearer {token}");
-    headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .is_some_and(|h| h == expected)
-}
-
-/// Snapshot of the current dashboard data (everything `/dashboard.png` is
-/// rendered from). Useful for debugging and for clients that want to render
-/// their own preview.
-#[utoipa::path(
-    get,
-    path = "/api/data",
-    responses(
-        (status = 200, description = "Current dashboard data + device state",
-         content_type = "application/json"),
-    ),
-    tag = "data",
-)]
-async fn api_data(State(state): State<AppState>) -> impl IntoResponse {
-    let data   = state.data.read().await.clone();
-    let device = state.device_state.read().await.clone();
-    Json(json!({
-        "device": device,
-        "time":     data.time,
-        "date":     data.date,
-        "date_dow": data.date_dow,
-        "motto":     data.motto,
-        "last_sync": data.last_sync,
-        "next_sync": data.next_sync,
-        "hosts":     data.hosts,
-        "cluster":  data.cluster,
-        "weather":  data.weather,
-        "agenda":   data.agenda,
-        "tasks":    data.tasks,
-        "budget":   data.budget,
-        "alerts":   data.alerts,
-    }))
-}
-
 async fn serve_png(State(state): State<AppState>) -> Response {
     // Always render fresh — no in-memory cache between requests.
     match render_now(&state).await {
@@ -302,24 +204,6 @@ async fn force_refresh(State(state): State<AppState>) -> impl IntoResponse {
 async fn health() -> impl IntoResponse {
     Json(json!({ "status": "ok" }))
 }
-
-// ── OpenAPI ───────────────────────────────────────────────────────────────────
-
-#[derive(OpenApi)]
-#[openapi(
-    info(
-        title = "trmnl-cyberpunk",
-        description = "BYOS server for TRMNL e-ink panels with the cyberpunk dashboard. Public endpoints: tasks (push from external services) + data (snapshot). Device-protocol endpoints (`/api/setup`, `/api/display`, `/api/log`) and the rendered PNG (`/dashboard.png`, `/dashboard/{epoch}`) are also reachable but not part of this schema.",
-        version = env!("CARGO_PKG_VERSION"),
-    ),
-    paths(get_tasks, put_tasks, api_data),
-    components(schemas(Task)),
-    tags(
-        (name = "tasks", description = "Push/read the OPS panel task list"),
-        (name = "data",  description = "Read the current dashboard snapshot"),
-    ),
-)]
-struct ApiDoc;
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -348,12 +232,9 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind failed");
     let bound = listener.local_addr().unwrap();
 
-    // Tasks start empty; clients populate them via `PUT /api/tasks`. The
-    // initial DashData uses mock for everything else (weather/budget/etc.)
-    // so the layout has content while integrations boot up — but we
-    // explicitly null out tasks here since they're externally-driven.
-    let mut initial_data = DashData::mock();
-    initial_data.tasks.clear();
+    // Initial DashData uses mock so the layout has content while
+    // integrations boot up; the first background fetch overwrites it.
+    let initial_data = DashData::mock();
 
     let state = AppState {
         device_state:   Arc::new(RwLock::new(DeviceState::default())),
@@ -361,7 +242,6 @@ async fn main() {
         sources:        Arc::new(Sources::from_env()),
         fetch_lock:     Arc::new(tokio::sync::Mutex::new(())),
         last_render_at: Arc::new(RwLock::new(0)),
-        tasks:          Arc::new(RwLock::new(Vec::new())),
         local_mode,
     };
 
@@ -369,18 +249,14 @@ async fn main() {
         .route("/api/setup",      get(api_setup))
         .route("/api/display",    get(api_display))
         .route("/api/log",        post(api_log))
-        .route("/api/data",       get(api_data))
-        .route("/api/tasks",      get(get_tasks).put(put_tasks))
         .route("/dashboard.png",  get(serve_png))
         // Cache-bustered URL for the firmware. `{epoch}` is just a marker
         // that changes whenever the rendered bytes do; the handler ignores
-        // it and always serves the current cache. Slash-separated segments
-        // sidestep both axum-0.8's "no literals in a param segment" rule
-        // *and* Swagger UI's wildcard catch-all at `/`.
+        // it and renders fresh either way. Slash-separated segments sidestep
+        // axum-0.8's "no literals in a param segment" rule.
         .route("/dashboard/{epoch}", get(serve_png))
         .route("/refresh",        get(force_refresh))
         .route("/health",         get(health))
-        .merge(SwaggerUi::new("/").url("/openapi.json", ApiDoc::openapi()))
         .with_state(state.clone());
 
     if let Some(path) = render_to {
