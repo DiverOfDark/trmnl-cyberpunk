@@ -787,7 +787,9 @@ fn draw_ops(c: &mut Canvas, tasks: &[Task], alerts: &[Alert]) {
 
     let pad_x = 10;
     let task_h = 14i32;
-    for (i, t) in tasks.iter().take(4).enumerate() {
+    let max_tasks = 4;
+    let task_count = tasks.len().min(max_tasks);
+    for (i, t) in tasks.iter().take(max_tasks).enumerate() {
         let y = content_y + (i as i32) * task_h;
         // Checkbox
         let mark = if t.done { "■" } else { "□" };
@@ -800,13 +802,26 @@ fn draw_ops(c: &mut Canvas, tasks: &[Task], alerts: &[Alert]) {
         draw_text(c, &f_body(), &text, panel.x + pad_x + 40, y + 10, C::Black, Align::Left);
     }
 
-    // Dashed top border for alerts area
-    let alerts_y = content_y + task_h * 4 + 6;
-    c.dashed_hline(panel.x + pad_x, alerts_y, panel.w - pad_x as u32 * 2, C::Black, 3, 3);
-
+    // Alerts area starts just below the rendered tasks (or at the top of
+    // content when tasks is empty), separated by a dashed divider only
+    // when both halves have content.
     let alert_h = 14i32;
-    for (i, a) in alerts.iter().take(2).enumerate() {
-        let y = alerts_y + 4 + (i as i32) * alert_h;
+    let alerts_y = if task_count == 0 {
+        content_y
+    } else {
+        let y = content_y + task_count as i32 * task_h + 6;
+        c.dashed_hline(panel.x + pad_x, y, panel.w - pad_x as u32 * 2, C::Black, 3, 3);
+        y + 4
+    };
+
+    // Show as many alerts as fit between alerts_y and the panel bottom
+    // (with a small footer pad). Each row is alert_h tall.
+    let bottom_pad = 4i32;
+    let avail = (panel.bottom() - bottom_pad - alerts_y).max(0);
+    let max_alerts = (avail / alert_h).max(0) as usize;
+
+    for (i, a) in alerts.iter().take(max_alerts).enumerate() {
+        let y = alerts_y + (i as i32) * alert_h;
         // Level pill
         let (bg, fg) = match a.level.as_str() {
             "ERR" => (C::Red, C::White),

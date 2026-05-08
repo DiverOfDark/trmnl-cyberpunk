@@ -456,29 +456,50 @@ impl Sources {
         let arr = resp.as_array()
             .ok_or_else(|| anyhow!("alertmanager response not array"))?;
 
-        let mut alerts: Vec<Alert> = arr.iter().take(6).map(|a| {
-            let severity = a["labels"]["severity"].as_str().unwrap_or("info");
-            let level = match severity {
-                "critical" | "error" => "ERR",
-                "warning"            => "WRN",
-                _                    => "INF",
-            }.to_string();
+        let mut alerts: Vec<Alert> = arr
+            .iter()
+            // Drop the Alertmanager Watchdog heartbeat — it always fires
+            // by design, so it's pure noise on the panel.
+            .filter(|a| a["labels"]["alertname"].as_str() != Some("Watchdog"))
+            .map(|a| {
+                let severity = a["labels"]["severity"].as_str().unwrap_or("info");
+                let level = match severity {
+                    "critical" | "error" => "ERR",
+                    "warning"            => "WRN",
+                    _                    => "INF",
+                }.to_string();
 
-            let starts_at = a["startsAt"].as_str().unwrap_or("");
-            let time = chrono::DateTime::parse_from_rfc3339(starts_at)
-                .map(|t| t.with_timezone(&Local).format("%H:%M").to_string())
-                .unwrap_or_else(|_| "--:--".to_string());
+                let starts_at = a["startsAt"].as_str().unwrap_or("");
+                let time = chrono::DateTime::parse_from_rfc3339(starts_at)
+                    .map(|t| t.with_timezone(&Local).format("%H:%M").to_string())
+                    .unwrap_or_else(|_| "--:--".to_string());
 
-            let message = a["annotations"]["summary"]
-                .as_str()
-                .or_else(|| a["annotations"]["message"].as_str())
-                .or_else(|| a["annotations"]["description"].as_str())
-                .or_else(|| a["labels"]["alertname"].as_str())
-                .unwrap_or("unknown alert")
-                .chars().take(50).collect();
+                // Prefer alertname (short, like "TargetDown") over the
+                // verbose summary, prefixed with the offending instance/pod
+                // when available so duplicate alertname rows still convey
+                // *which* target is down.
+                let alertname = a["labels"]["alertname"].as_str().unwrap_or("");
+                let target = a["labels"]["instance"].as_str()
+                    .or_else(|| a["labels"]["pod"].as_str())
+                    .or_else(|| a["labels"]["namespace"].as_str())
+                    .unwrap_or("");
+                let message = if !alertname.is_empty() && !target.is_empty() {
+                    format!("{alertname} · {target}").chars().take(60).collect()
+                } else if !alertname.is_empty() {
+                    alertname.chars().take(60).collect()
+                } else {
+                    a["annotations"]["summary"]
+                        .as_str()
+                        .or_else(|| a["annotations"]["description"].as_str())
+                        .unwrap_or("unknown alert")
+                        .chars().take(60).collect()
+                };
 
-            Alert { level, time, message }
-        }).collect();
+                Alert { level, time, message }
+            })
+            // Render-side caps at panel-fit; this is just a sanity bound.
+            .take(20)
+            .collect();
 
         // Sort: ERR first, then WRN, then INF
         alerts.sort_by_key(|a| match a.level.as_str() { "ERR" => 0, "WRN" => 1, _ => 2 });
