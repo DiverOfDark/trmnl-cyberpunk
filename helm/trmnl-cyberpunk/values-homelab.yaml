@@ -1,0 +1,99 @@
+# Example values that map 1:1 onto the manual k3s manifests under
+# k3s-userapps/trmnl-cyberpunk. Apply with:
+#
+#   helm upgrade --install trmnl-cyberpunk \
+#     oci://ghcr.io/diverofdark/charts/trmnl-cyberpunk \
+#     --namespace trmnl-cyberpunk --create-namespace \
+#     -f values-homelab.yaml
+
+image:
+  repository: ghcr.io/diverofdark/trmnl-cyberpunk
+  tag: main
+  pullPolicy: Always
+
+# gethomepage's pod-selector annotation expects this exact label.
+podLabels:
+  app.kubernetes.io/pod: trmnl-cyberpunk
+
+baseUrl: "https://trmnl.kirillorlov.pro"
+refreshSecs: "3600"
+timezone: "Europe/Berlin"
+
+prometheusUrl: "http://prometheus-kube-prometheus-prometheus.prometheus.svc.cluster.local:9090"
+alertmanagerUrl: "http://prometheus-kube-prometheus-alertmanager.prometheus.svc.cluster.local:9093"
+
+actualbudgetUrl: "https://money-api.kirillorlov.pro/v1/"
+
+weatherLat: "52.50"
+weatherLon: "13.33"
+weatherTz: "Europe/Berlin"
+
+# Pull every secret from OpenBao via external-secrets-operator. The
+# ExternalSecret produces a plain Secret named "trmnl-cyberpunk" which
+# the deployment consumes via envFrom.
+existingSecret: trmnl-cyberpunk
+
+additionalObjects:
+  - apiVersion: external-secrets.io/v1
+    kind: ExternalSecret
+    metadata:
+      name: trmnl-cyberpunk
+    spec:
+      secretStoreRef:
+        name: openbao-store
+        kind: ClusterSecretStore
+      refreshInterval: 1h
+      target:
+        name: trmnl-cyberpunk
+        creationPolicy: Owner
+        deletionPolicy: Retain
+      data:
+        - secretKey: TRMNL_API_KEY
+          remoteRef:
+            key: trmnl-cyberpunk
+            property: api_key
+        - secretKey: ICS_URLS
+          remoteRef:
+            key: trmnl-cyberpunk
+            property: ics_urls
+        - secretKey: ACTUALBUDGET_KEY
+          remoteRef:
+            key: trmnl-cyberpunk
+            property: actualbudget_key
+        - secretKey: ACTUALBUDGET_SYNC_ID
+          remoteRef:
+            key: trmnl-cyberpunk
+            property: actualbudget_syncid
+        - secretKey: ACTUALBUDGET_PASSWORD
+          remoteRef:
+            key: trmnl-cyberpunk
+            property: actualbudget_encryption
+
+ingress:
+  enabled: true
+  annotations:
+    cert-manager.io/cluster-issuer: acme-issuer
+    gethomepage.dev/enabled: "true"
+    gethomepage.dev/href: "https://trmnl.kirillorlov.pro/dashboard.png"
+    gethomepage.dev/group: Apps
+    gethomepage.dev/name: TRMNL Cyberpunk
+    gethomepage.dev/icon: https://avatars.githubusercontent.com/u/164423030?s=48&v=4
+    gethomepage.dev/pod-selector: "app.kubernetes.io/pod=trmnl-cyberpunk"
+    gethomepage.dev/description: "Spectra 6-color e-ink dashboard"
+  hosts:
+    - host: trmnl.kirillorlov.pro
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - hosts:
+        - trmnl.kirillorlov.pro
+      secretName: trmnl-cyberpunk-tls
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi

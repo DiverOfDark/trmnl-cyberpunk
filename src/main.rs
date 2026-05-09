@@ -5,7 +5,6 @@ mod render;
 mod windows_tz;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::{
     extract::State,
@@ -38,8 +37,9 @@ struct AppState {
     device_state: Arc<RwLock<DeviceState>>,
     data: Arc<RwLock<DashData>>,
     sources: Arc<Sources>,
-    /// Dedupes concurrent upstream-fetch runs. The render itself is per-
-    /// request (no cache) so this only guards `refresh_data`.
+    /// Serializes upstream-fetch runs. Every `/dashboard*` request triggers
+    /// a fetch, so without this a burst of requests would fan out into N
+    /// parallel upstream pulls.
     fetch_lock: Arc<tokio::sync::Mutex<()>>,
     /// Unix epoch (seconds) of the last successful render. Bumped on every
     /// PNG render; embedded into `/api/display` URLs as a cache-buster
@@ -100,13 +100,11 @@ fn build_display_response(epoch: i64) -> DisplayResponse {
 // ── Data refresh ──────────────────────────────────────────────────────────────
 
 /// Pull from every configured upstream and stash the result in `state.data`.
-/// Concurrent runs are deduped via `fetch_lock`. No rendering happens here —
-/// renders are per-request in `serve_png` / `render_now`.
+/// Concurrent runs serialize via `fetch_lock` — callers always observe fresh
+/// data after this returns. No rendering happens here; renders are per-
+/// request in `serve_png` / `render_now`.
 async fn refresh_data(state: &AppState) {
-    let Ok(_guard) = state.fetch_lock.try_lock() else {
-        info!("fetch already in progress, skipping");
-        return;
-    };
+    let _guard = state.fetch_lock.lock().await;
 
     let mock = DashData::mock();
     let fresh = if state.local_mode {
@@ -160,10 +158,8 @@ async fn api_display(State(state): State<AppState>, device: DeviceInfo) -> Json<
         ds.last_seen = chrono::Local::now().format("%H:%M").to_string();
     }
 
-    // Trigger async re-render so the new battery/signal shows on next refresh
-    let s = state.clone();
-    tokio::spawn(async move { refresh_data(&s).await });
-
+    // No fetch here — the firmware will hit `/dashboard/{epoch}` next, and
+    // `serve_png` refreshes upstream data before rendering.
     let epoch = *state.last_render_at.read().await;
     Json(build_display_response(epoch))
 }
@@ -181,7 +177,9 @@ async fn api_log(State(_): State<AppState>, device: DeviceInfo, body: String) ->
 }
 
 async fn serve_png(State(state): State<AppState>) -> Response {
-    // Always render fresh — no in-memory cache between requests.
+    // Every request → fresh upstream pull → fresh render. Matches the user
+    // expectation that pressing the device's refresh button gets new data.
+    refresh_data(&state).await;
     match render_now(&state).await {
         Ok(bytes) => (
             StatusCode::OK,
@@ -278,19 +276,6 @@ async fn main() {
         drop(listener);
         return;
     }
-
-    // Background data refresh — fires once at startup and on `REFRESH_SECS`
-    // intervals after that. No render here; the PNG is rendered fresh on
-    // every device fetch.
-    let bg = state.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let secs = refresh_secs() as u64;
-        loop {
-            refresh_data(&bg).await;
-            tokio::time::sleep(Duration::from_secs(secs)).await;
-        }
-    });
 
     info!("Listening on http://{bound}{}", if local_mode { " (LOCAL_MODE: mock data only)" } else { "" });
     info!("Image    →  http://{bound}/dashboard.png");
