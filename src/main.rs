@@ -41,11 +41,6 @@ struct AppState {
     /// a fetch, so without this a burst of requests would fan out into N
     /// parallel upstream pulls.
     fetch_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Unix epoch (seconds) of the last successful render. Bumped on every
-    /// PNG render; embedded into `/api/display` URLs as a cache-buster
-    /// (`dashboard-{epoch}.png`) so the firmware skips its 24h dedupe and
-    /// re-fetches when the image has changed.
-    last_render_at: Arc<RwLock<i64>>,
     local_mode: bool,
 }
 
@@ -68,15 +63,11 @@ fn refresh_secs() -> u32 {
 }
 
 /// Filename the firmware uses as its 24h dedupe cache key. It expects a
-/// 10-digit Unix epoch suffix (`dashboard-1778185416.png`) so the value
-/// must change whenever the rendered bytes change.
+/// 10-digit Unix epoch suffix (`dashboard-1778185416.png`); we stamp it
+/// with the current time on every poll so the firmware always sees a
+/// fresh URL and re-downloads.
 fn dashboard_filename(epoch: i64) -> String {
-    if epoch > 0 {
-        format!("dashboard-{epoch}.png")
-    } else {
-        // Pre-first-render fallback.
-        "dashboard.png".to_string()
-    }
+    format!("dashboard-{epoch}.png")
 }
 
 /// URL the firmware downloads. Goes through `/dashboard/{epoch}` rather than
@@ -85,11 +76,7 @@ fn dashboard_filename(epoch: i64) -> String {
 /// (and reply 404 because Swagger has no such asset). Slash-separated
 /// segments don't conflict with the UI's wildcard.
 fn dashboard_url(epoch: i64) -> String {
-    if epoch > 0 {
-        format!("{}/dashboard/{epoch}", base_url())
-    } else {
-        format!("{}/dashboard.png", base_url())
-    }
+    format!("{}/dashboard/{epoch}", base_url())
 }
 
 fn build_display_response(epoch: i64) -> DisplayResponse {
@@ -117,8 +104,7 @@ async fn refresh_data(state: &AppState) {
 }
 
 /// Render the current `state.data` to a PNG. Called per-request from
-/// `serve_png`, and once at the end of `RENDER_TO=...` mode. Bumps
-/// `last_render_at` on success so the `/api/display` URL is cache-busted.
+/// `serve_png`, and once at the end of `RENDER_TO=...` mode.
 async fn render_now(state: &AppState) -> anyhow::Result<Vec<u8>> {
     let mut data = state.data.read().await.clone();
     data.refresh_clock();
@@ -129,16 +115,15 @@ async fn render_now(state: &AppState) -> anyhow::Result<Vec<u8>> {
     })
     .await??;
 
-    *state.last_render_at.write().await = chrono::Utc::now().timestamp();
     Ok(bytes)
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-async fn api_setup(State(state): State<AppState>, device: DeviceInfo) -> impl IntoResponse {
+async fn api_setup(State(_): State<AppState>, device: DeviceInfo) -> impl IntoResponse {
     info!(mac = %device.mac_address, fw = ?device.firmware_version, "device setup");
     let api_key = std::env::var("TRMNL_API_KEY").unwrap_or_else(|_| "cyberpunk-byos".into());
-    let epoch = *state.last_render_at.read().await;
+    let epoch = chrono::Utc::now().timestamp();
     Json(json!({
         "api_key":     api_key,
         "friendly_id": mac_short_id(&device.mac_address),
@@ -159,8 +144,10 @@ async fn api_display(State(state): State<AppState>, device: DeviceInfo) -> Json<
     }
 
     // No fetch here — the firmware will hit `/dashboard/{epoch}` next, and
-    // `serve_png` refreshes upstream data before rendering.
-    let epoch = *state.last_render_at.read().await;
+    // `serve_png` refreshes upstream data before rendering. Stamp the URL
+    // with the current timestamp so the firmware's 24h filename-dedupe sees
+    // a new key on every poll and re-downloads.
+    let epoch = chrono::Utc::now().timestamp();
     Json(build_display_response(epoch))
 }
 
@@ -230,16 +217,15 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind failed");
     let bound = listener.local_addr().unwrap();
 
-    // Initial DashData uses mock so the layout has content while
-    // integrations boot up; the first background fetch overwrites it.
+    // Initial DashData uses mock so the layout has content until the first
+    // `/dashboard*` request triggers an upstream fetch.
     let initial_data = DashData::mock();
 
     let state = AppState {
-        device_state:   Arc::new(RwLock::new(DeviceState::default())),
-        data:           Arc::new(RwLock::new(initial_data)),
-        sources:        Arc::new(Sources::from_env()),
-        fetch_lock:     Arc::new(tokio::sync::Mutex::new(())),
-        last_render_at: Arc::new(RwLock::new(0)),
+        device_state: Arc::new(RwLock::new(DeviceState::default())),
+        data:         Arc::new(RwLock::new(initial_data)),
+        sources:      Arc::new(Sources::from_env()),
+        fetch_lock:   Arc::new(tokio::sync::Mutex::new(())),
         local_mode,
     };
 
