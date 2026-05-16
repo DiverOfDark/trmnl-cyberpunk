@@ -292,7 +292,7 @@ fn draw_body(c: &mut Canvas, data: &DashData) {
     c.hline(col3_x, BODY_TOP + ROW_H as i32,     COL3_W, C::Black);
     c.hline(col3_x, BODY_TOP + ROW_H as i32 + 1, COL3_W, C::Black);
 
-    draw_weather(c, data.weather.as_ref());
+    draw_weather(c, data, data.weather.as_ref());
     draw_agenda(c, &data.agenda, &data.shipments_due_today);
     draw_sys(c, &data.hosts, data.cluster.as_ref());
     draw_budget(c, data.budget.as_ref());
@@ -341,9 +341,21 @@ fn draw_section_header(c: &mut Canvas, panel: Rect, en: &str, seq: &str) -> i32 
     line_y + 2 + 6 // 6px breathing room before content
 }
 
+
+fn draw_parcel_icon_big(c: &mut Canvas, cx: i32, cy: i32, color: C) {
+    // Larger parcel icon used as a day-level delivery indicator in WX.
+    c.stroke_rect(Rect::new(cx - 14, cy - 10, 28, 20), 2, color);
+    c.hline(cx - 14, cy - 2, 28, color);
+    c.hline(cx - 14, cy - 1, 28, color);
+    c.vline(cx, cy - 10, 9, color);
+    c.vline(cx + 1, cy - 10, 9, color);
+    c.put(cx - 2, cy - 10, color);
+    c.put(cx + 3, cy - 10, color);
+}
+
 // ── Weather panel ──────────────────────────────────────────────────────────
 
-fn draw_weather(c: &mut Canvas, w: Option<&WeatherData>) {
+fn draw_weather(c: &mut Canvas, data: &DashData, w: Option<&WeatherData>) {
     let panel = col1_rect();
     let content_y = draw_section_header(c, panel, "WX", "// 01");
 
@@ -432,6 +444,10 @@ fn draw_weather(c: &mut Canvas, w: Option<&WeatherData>) {
     let icon_size = (icon_band_bot - icon_band_top - 8).clamp(40, 90);
     let hero_cond = w.hourly.first().map(|h| h.cond.as_str()).unwrap_or(&w.condition);
     draw_weather_icon(c, icon_cx, icon_cy, icon_size, hero_cond, C::Black);
+
+    if !data.shipments_due_today.is_empty() {
+        draw_parcel_icon_big(c, panel.x + 28, panel.bottom() - 68, C::Red);
+    }
 
     let cell_w = (panel.w - 24) / 4;
     for (i, day) in w.forecast.iter().take(4).enumerate() {
