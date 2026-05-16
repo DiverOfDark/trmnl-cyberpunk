@@ -642,7 +642,7 @@ fn draw_agenda(c: &mut Canvas, items: &[AgendaItem], shipments_due_today: &[Ship
     for shipment in shipments_due_today.iter().take(2) {
         if rows_used >= max_rows { break; }
         let y = content_y + (rows_used as i32) * row_h;
-        draw_text(c, &f_small_bold(), "DUE", time_x, y + 9, C::Red, Align::Left);
+        draw_text(c, &f_small_bold(), "DLV", time_x, y + 9, C::Red, Align::Left);
         let title = clip_to_width(&f_small(), &shipment.remark, title_max_w);
         draw_text(c, &f_small(), &title, title_x, y + 9, C::Black, Align::Left);
         rows_used += 1;
