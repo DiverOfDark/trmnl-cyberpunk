@@ -16,3 +16,4 @@ data:
   WEATHER_LAT: {{ .Values.weatherLat | default "52.50" | quote }}
   WEATHER_LON: {{ .Values.weatherLon | default "13.33" | quote }}
   WEATHER_TZ: {{ .Values.weatherTz | default "Europe/Berlin" | quote }}
+  SEVENTEENTRACK_KEY: {{ .Values.seventeentrackKey | default "" | quote }}

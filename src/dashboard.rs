@@ -292,8 +292,8 @@ fn draw_body(c: &mut Canvas, data: &DashData) {
     c.hline(col3_x, BODY_TOP + ROW_H as i32,     COL3_W, C::Black);
     c.hline(col3_x, BODY_TOP + ROW_H as i32 + 1, COL3_W, C::Black);
 
-    draw_weather(c, data.weather.as_ref());
-    draw_agenda(c, &data.agenda);
+    draw_weather(c, data, data.weather.as_ref());
+    draw_agenda(c, &data.agenda, &data.shipments_due_today);
     draw_sys(c, &data.hosts, data.cluster.as_ref());
     draw_budget(c, data.budget.as_ref());
     draw_ops(c, &data.alerts);
@@ -341,9 +341,24 @@ fn draw_section_header(c: &mut Canvas, panel: Rect, en: &str, seq: &str) -> i32 
     line_y + 2 + 6 // 6px breathing room before content
 }
 
+
+fn draw_mail_icon_big(c: &mut Canvas, cx: i32, cy: i32, color: C) {
+    // Large envelope icon for delivery-day indicator in WX.
+    c.stroke_rect(Rect::new(cx - 20, cy - 14, 40, 28), 2, color);
+    // Flap lines.
+    for i in 0..18 {
+        c.put(cx - 18 + i, cy - 12 + i / 2, color);
+        c.put(cx + 18 - i, cy - 12 + i / 2, color);
+    }
+    for i in 0..18 {
+        c.put(cx - 18 + i, cy + 12 - i / 2, color);
+        c.put(cx + 18 - i, cy + 12 - i / 2, color);
+    }
+}
+
 // ── Weather panel ──────────────────────────────────────────────────────────
 
-fn draw_weather(c: &mut Canvas, w: Option<&WeatherData>) {
+fn draw_weather(c: &mut Canvas, data: &DashData, w: Option<&WeatherData>) {
     let panel = col1_rect();
     let content_y = draw_section_header(c, panel, "WX", "// 01");
 
@@ -367,7 +382,7 @@ fn draw_weather(c: &mut Canvas, w: Option<&WeatherData>) {
     let deg_cy = content_y + 30;
     draw_circle_outline(c, deg_cx, deg_cy, deg_r, 2, C::Red);
 
-    // Side info (condition + HI/LO).
+    // Side info (condition + HI/LO + next hourly slots).
     let side_x = deg_cx + deg_r + 12;
     let side_avail = panel.right() - 12 - side_x;
     if side_avail >= 70 {
@@ -381,6 +396,17 @@ fn draw_weather(c: &mut Canvas, w: Option<&WeatherData>) {
             C::Black,
             Align::Left,
         );
+        for (i, hour) in w.hourly.iter().take(3).enumerate() {
+            draw_text(
+                c,
+                &f_small(),
+                &format!("{} {}° {}", hour.time, hour.temp_c, hour.cond),
+                side_x,
+                content_y + 72 + (i as i32) * 14,
+                C::Black,
+                Align::Left,
+            );
+        }
     } else {
         draw_text(c, &f_body_bold(), &w.condition, temp_x, content_y + 122, C::Black, Align::Left);
         draw_text(
@@ -392,6 +418,17 @@ fn draw_weather(c: &mut Canvas, w: Option<&WeatherData>) {
             C::Black,
             Align::Left,
         );
+        for (i, hour) in w.hourly.iter().take(3).enumerate() {
+            draw_text(
+                c,
+                &f_small(),
+                &format!("{} {}° {}", hour.time, hour.temp_c, hour.cond),
+                temp_x,
+                content_y + 154 + (i as i32) * 14,
+                C::Black,
+                Align::Left,
+            );
+        }
     }
 
     // Forecast: 4-column grid pinned to bottom of panel.
@@ -400,13 +437,20 @@ fn draw_weather(c: &mut Canvas, w: Option<&WeatherData>) {
     c.hline(panel.x + 12, fc_y, panel.w - 24, C::Black);
 
     // Big condition icon centred in the empty band between the temp digits
-    // and the forecast grid.
+    // and the forecast grid. Prefer the nearest upcoming hourly slot so the
+    // hero visual reflects what is about to happen, not only the all-day
+    // current/daily summary.
     let icon_band_top = temp_baseline + 16;
     let icon_band_bot = fc_y - 6;
     let icon_cy = (icon_band_top + icon_band_bot) / 2;
     let icon_cx = panel.x + panel.w as i32 / 2;
     let icon_size = (icon_band_bot - icon_band_top - 8).clamp(40, 90);
-    draw_weather_icon(c, icon_cx, icon_cy, icon_size, &w.condition, C::Black);
+    let hero_cond = w.hourly.first().map(|h| h.cond.as_str()).unwrap_or(&w.condition);
+    draw_weather_icon(c, icon_cx, icon_cy, icon_size, hero_cond, C::Black);
+
+    if !data.shipments_due_today.is_empty() {
+        draw_mail_icon_big(c, panel.x + 40, panel.bottom() - 78, C::Red);
+    }
 
     let cell_w = (panel.w - 24) / 4;
     for (i, day) in w.forecast.iter().take(4).enumerate() {
@@ -583,14 +627,24 @@ fn draw_circle_outline(c: &mut Canvas, cx: i32, cy: i32, r: i32, stroke: i32, co
     }
 }
 
+
+fn draw_parcel_icon(c: &mut Canvas, cx: i32, cy: i32, color: C) {
+    // Tiny 12x10 parcel/box icon for agenda delivery rows.
+    c.stroke_rect(Rect::new(cx - 6, cy - 4, 12, 8), 1, color);
+    c.hline(cx - 6, cy - 1, 12, color);
+    c.vline(cx, cy - 4, 4, color);
+    c.put(cx - 1, cy - 4, color);
+    c.put(cx + 1, cy - 4, color);
+}
+
 // ── Agenda panel ───────────────────────────────────────────────────────────
 
-fn draw_agenda(c: &mut Canvas, items: &[AgendaItem]) {
+fn draw_agenda(c: &mut Canvas, items: &[AgendaItem], shipments_due_today: &[ShipmentHighlight]) {
     let panel = col2_top();
     let content_y = draw_section_header(c, panel, "AGENDA", "// 02");
 
     let pad_x = 12;
-    if items.is_empty() {
+    if items.is_empty() && shipments_due_today.is_empty() {
         draw_text(c, &f_small(), "NO EVENTS TODAY", panel.x + pad_x, content_y + 18, C::Black, Align::Left);
         return;
     }
@@ -603,7 +657,8 @@ fn draw_agenda(c: &mut Canvas, items: &[AgendaItem]) {
     let row_h = 14i32;
     let bottom_pad = 4i32;
     let avail = (panel.bottom() - bottom_pad - content_y).max(0);
-    let max_rows = ((avail / row_h) as usize).min(items.len());
+    let mut rows_used = 0usize;
+    let max_rows = (avail / row_h) as usize;
 
     let time_x = panel.x + pad_x;
     let title_x = time_x + 36;
@@ -613,9 +668,18 @@ fn draw_agenda(c: &mut Canvas, items: &[AgendaItem]) {
     let dur_w = 40i32;
     let title_max_w = (dur_right - dur_w - title_x - 4).max(0) as u32;
 
-    for (i, ev) in items.iter().take(max_rows).enumerate() {
-        let y = content_y + (i as i32) * row_h;
-        let time_color = if i == 0 { C::Red } else { C::Black };
+    for shipment in shipments_due_today.iter().take(2) {
+        if rows_used >= max_rows { break; }
+        let y = content_y + (rows_used as i32) * row_h;
+        draw_parcel_icon(c, time_x + 10, y + 5, C::Red);
+        let title = clip_to_width(&f_small(), &shipment.remark, title_max_w);
+        draw_text(c, &f_small(), &title, title_x, y + 9, C::Black, Align::Left);
+        rows_used += 1;
+    }
+
+    for ev in items.iter().take(max_rows.saturating_sub(rows_used)) {
+        let y = content_y + (rows_used as i32) * row_h;
+        let time_color = if rows_used == 0 { C::Red } else { C::Black };
         draw_text(c, &f_small_bold(), &ev.time, time_x, y + 9, time_color, Align::Left);
 
         let title = clip_to_width(&f_small(), &ev.title, title_max_w);
@@ -624,6 +688,7 @@ fn draw_agenda(c: &mut Canvas, items: &[AgendaItem]) {
         if !ev.duration.is_empty() {
             draw_text(c, &f_small(), &ev.duration, dur_right, y + 9, C::Black, Align::Right);
         }
+        rows_used += 1;
     }
 }
 
@@ -911,15 +976,14 @@ fn draw_ops(c: &mut Canvas, alerts: &[Alert]) {
 
     let pad_x = 10;
     let alert_h = 14i32;
+    let y = content_y;
 
-    // Show as many alerts as fit between content_y and the panel bottom
-    // (with a small footer pad). Each row is alert_h tall.
     let bottom_pad = 4i32;
-    let avail = (panel.bottom() - bottom_pad - content_y).max(0);
+    let avail = (panel.bottom() - bottom_pad - y).max(0);
     let max_alerts = (avail / alert_h).max(0) as usize;
 
     for (i, a) in alerts.iter().take(max_alerts).enumerate() {
-        let y = content_y + (i as i32) * alert_h;
+        let y = y + (i as i32) * alert_h;
         // Level pill
         let (bg, fg) = match a.level.as_str() {
             "ERR" => (C::Red, C::White),

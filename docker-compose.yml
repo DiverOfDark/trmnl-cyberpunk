@@ -35,3 +35,4 @@ services:
       WEATHER_LAT: "52.50"
       WEATHER_LON: "13.33"
       WEATHER_TZ: "Europe/Berlin"
+      SEVENTEENTRACK_KEY: ""

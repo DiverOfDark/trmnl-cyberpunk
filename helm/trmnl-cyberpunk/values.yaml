@@ -104,6 +104,9 @@ weatherLat: "52.50"
 weatherLon: "13.33"
 weatherTz: "Europe/Berlin"
 
+# 17TRACK API key for parcel highlights.
+seventeentrackKey: ""
+
 # ── Secrets ──────────────────────────────────────────────────────────────
 #
 # Two ways to feed the deployment's `envFrom` Secret:
