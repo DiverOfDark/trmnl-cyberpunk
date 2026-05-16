@@ -104,8 +104,9 @@ weatherLat: "52.50"
 weatherLon: "13.33"
 weatherTz: "Europe/Berlin"
 
-# 17TRACK API key for parcel highlights.
-seventeentrackKey: ""
+# trackhound base URL for parcel highlights.
+# See https://github.com/DiverOfDark/trackhound
+trackhoundBaseUrl: ""
 
 # ── Secrets ──────────────────────────────────────────────────────────────
 #

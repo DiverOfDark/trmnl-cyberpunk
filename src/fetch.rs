@@ -42,7 +42,7 @@ pub struct Sources {
     pub weather_lat: f64,
     pub weather_lon: f64,
     pub weather_tz: String,
-    pub seventeentrack_key: String,
+    pub trackhound_base_url: String,
 }
 
 impl Sources {
@@ -86,7 +86,7 @@ impl Sources {
                 .unwrap_or(13.33),
             weather_tz: std::env::var("WEATHER_TZ")
                 .unwrap_or_else(|_| "Europe/Berlin".into()),
-            seventeentrack_key: std::env::var("SEVENTEENTRACK_KEY").unwrap_or_default(),
+            trackhound_base_url: std::env::var("TRACKHOUND_BASE_URL").unwrap_or_default(),
         }
     }
 
@@ -510,38 +510,53 @@ impl Sources {
     }
 
     async fn shipments_due_today(&self) -> Result<Vec<ShipmentHighlight>> {
-        if self.seventeentrack_key.is_empty() {
-            return Err(NotConfigured("SEVENTEENTRACK_KEY").into());
+        if self.trackhound_base_url.is_empty() {
+            return Err(NotConfigured("TRACKHOUND_BASE_URL").into());
         }
-        let req_body = serde_json::json!({"page_no": 1, "package_state": 40});
-        let resp: Value = self.client
-            .post("https://api.17track.net/track/v2.4/gettracklist")
-            .header("17token", &self.seventeentrack_key)
-            .json(&req_body)
+        let url = format!("{}/shipments", self.trackhound_base_url.trim_end_matches('/'));
+        let items: Vec<Value> = self.client
+            .get(&url)
             .send()
             .await?
             .json()
             .await?;
         let today = Local::now().date_naive();
-        let items = resp["data"]["accepted"].as_array().cloned().unwrap_or_default();
         let mut out = Vec::new();
         for item in items {
-            let Some(delivery_time) = item["delievery_time"].as_str() else { continue; };
-            let Ok(dt) = chrono::DateTime::parse_from_rfc3339(delivery_time) else { continue; };
-            let local = dt.with_timezone(&Local);
-            if local.date_naive() != today { continue; }
-            out.push(ShipmentHighlight {
-                number: item["number"].as_str().unwrap_or("").to_string(),
-                remark: item["remark"].as_str().filter(|s| !s.is_empty())
-                    .or_else(|| item["tag"].as_str().filter(|s| !s.is_empty()))
-                    .unwrap_or("Parcel due today")
-                    .to_string(),
-                status: item["latest_event_info"].as_str().filter(|s| !s.is_empty())
-                    .unwrap_or("Delivered today")
-                    .to_string(),
-            });
+            let status = item["status"].as_str().unwrap_or("");
+            let is_out_for_delivery = status == "out_for_delivery";
+            let expected_today = item["expected_delivery_date"]
+                .as_str()
+                .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+                .map(|d| d == today)
+                .unwrap_or(false);
+            if !is_out_for_delivery && !expected_today { continue; }
+            // Skip terminal/unknown states even if the date happens to match.
+            if matches!(status, "delivered" | "failed" | "unknown") { continue; }
+            let number = item["tracking_number"].as_str().filter(|s| !s.is_empty())
+                .or_else(|| item["order_number"].as_str().filter(|s| !s.is_empty()))
+                .unwrap_or("")
+                .to_string();
+            let remark = item["title"].as_str().filter(|s| !s.is_empty())
+                .or_else(|| item["merchant"].as_str().filter(|s| !s.is_empty()))
+                .unwrap_or("Parcel due today")
+                .to_string();
+            let status_text = item["last_event_text"].as_str().filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| humanize_status(status));
+            out.push(ShipmentHighlight { number, remark, status: status_text });
         }
         Ok(out)
+    }
+}
+
+fn humanize_status(s: &str) -> String {
+    match s {
+        "out_for_delivery" => "Out for delivery".into(),
+        "in_transit"       => "In transit".into(),
+        "registered"       => "Registered".into(),
+        "detected"         => "Detected".into(),
+        _                  => "Delivered today".into(),
     }
 }
 

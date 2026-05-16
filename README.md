@@ -17,7 +17,7 @@ The server renders the dashboard pixel-by-pixel in Rust (`embedded-graphics` + u
 - Full TRMNL BYOS protocol — `/api/setup`, `/api/display`, `/api/log`
 - Battery % and RSSI from the device are shown in the dashboard header
 - 4-bit indexed PNG output: every pixel is exactly one of the six panel inks (no dithering, no antialiasing) so the panel renders what we drew
-- Pluggable upstreams: Prometheus + Alertmanager, Nextcloud CalDAV, ActualBudget, Open-Meteo. Mock fallbacks for everything when env vars are blank
+- Pluggable upstreams: Prometheus + Alertmanager, Nextcloud CalDAV, ActualBudget, Open-Meteo, [trackhound](https://github.com/DiverOfDark/trackhound). Mock fallbacks for everything when env vars are blank
 - Norse-mythology mock hostnames, multi-day weather, calendar agenda, budget categories, alert feed
 
 ### Dashboard panels

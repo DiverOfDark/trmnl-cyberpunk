@@ -35,4 +35,7 @@ services:
       WEATHER_LAT: "52.50"
       WEATHER_LON: "13.33"
       WEATHER_TZ: "Europe/Berlin"
-      SEVENTEENTRACK_KEY: ""
+
+      # trackhound base URL for parcel highlights — leave blank to disable.
+      # See https://github.com/DiverOfDark/trackhound
+      TRACKHOUND_BASE_URL: ""
