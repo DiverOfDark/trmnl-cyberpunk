@@ -342,15 +342,18 @@ fn draw_section_header(c: &mut Canvas, panel: Rect, en: &str, seq: &str) -> i32 
 }
 
 
-fn draw_parcel_icon_big(c: &mut Canvas, cx: i32, cy: i32, color: C) {
-    // Larger parcel icon used as a day-level delivery indicator in WX.
-    c.stroke_rect(Rect::new(cx - 14, cy - 10, 28, 20), 2, color);
-    c.hline(cx - 14, cy - 2, 28, color);
-    c.hline(cx - 14, cy - 1, 28, color);
-    c.vline(cx, cy - 10, 9, color);
-    c.vline(cx + 1, cy - 10, 9, color);
-    c.put(cx - 2, cy - 10, color);
-    c.put(cx + 3, cy - 10, color);
+fn draw_mail_icon_big(c: &mut Canvas, cx: i32, cy: i32, color: C) {
+    // Large envelope icon for delivery-day indicator in WX.
+    c.stroke_rect(Rect::new(cx - 20, cy - 14, 40, 28), 2, color);
+    // Flap lines.
+    for i in 0..18 {
+        c.put(cx - 18 + i, cy - 12 + i / 2, color);
+        c.put(cx + 18 - i, cy - 12 + i / 2, color);
+    }
+    for i in 0..18 {
+        c.put(cx - 18 + i, cy + 12 - i / 2, color);
+        c.put(cx + 18 - i, cy + 12 - i / 2, color);
+    }
 }
 
 // ── Weather panel ──────────────────────────────────────────────────────────
@@ -446,7 +449,7 @@ fn draw_weather(c: &mut Canvas, data: &DashData, w: Option<&WeatherData>) {
     draw_weather_icon(c, icon_cx, icon_cy, icon_size, hero_cond, C::Black);
 
     if !data.shipments_due_today.is_empty() {
-        draw_parcel_icon_big(c, panel.x + 28, panel.bottom() - 68, C::Red);
+        draw_mail_icon_big(c, panel.x + 40, panel.bottom() - 78, C::Red);
     }
 
     let cell_w = (panel.w - 24) / 4;
