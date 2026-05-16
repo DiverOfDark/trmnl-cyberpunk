@@ -608,6 +608,16 @@ fn draw_circle_outline(c: &mut Canvas, cx: i32, cy: i32, r: i32, stroke: i32, co
     }
 }
 
+
+fn draw_parcel_icon(c: &mut Canvas, cx: i32, cy: i32, color: C) {
+    // Tiny 12x10 parcel/box icon for agenda delivery rows.
+    c.stroke_rect(Rect::new(cx - 6, cy - 4, 12, 8), 1, color);
+    c.hline(cx - 6, cy - 1, 12, color);
+    c.vline(cx, cy - 4, 4, color);
+    c.put(cx - 1, cy - 4, color);
+    c.put(cx + 1, cy - 4, color);
+}
+
 // ── Agenda panel ───────────────────────────────────────────────────────────
 
 fn draw_agenda(c: &mut Canvas, items: &[AgendaItem], shipments_due_today: &[ShipmentHighlight]) {
@@ -642,7 +652,7 @@ fn draw_agenda(c: &mut Canvas, items: &[AgendaItem], shipments_due_today: &[Ship
     for shipment in shipments_due_today.iter().take(2) {
         if rows_used >= max_rows { break; }
         let y = content_y + (rows_used as i32) * row_h;
-        draw_text(c, &f_small_bold(), "DLV", time_x, y + 9, C::Red, Align::Left);
+        draw_parcel_icon(c, time_x + 10, y + 5, C::Red);
         let title = clip_to_width(&f_small(), &shipment.remark, title_max_w);
         draw_text(c, &f_small(), &title, title_x, y + 9, C::Black, Align::Left);
         rows_used += 1;
