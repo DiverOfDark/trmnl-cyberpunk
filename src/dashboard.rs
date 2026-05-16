@@ -296,7 +296,7 @@ fn draw_body(c: &mut Canvas, data: &DashData) {
     draw_agenda(c, &data.agenda);
     draw_sys(c, &data.hosts, data.cluster.as_ref());
     draw_budget(c, data.budget.as_ref());
-    draw_ops(c, &data.alerts);
+    draw_ops(c, &data.alerts, &data.shipments_due_today);
 }
 
 // ── Section header (the "stamp" with EN tag + // NN seq) ───────────────────
@@ -367,7 +367,7 @@ fn draw_weather(c: &mut Canvas, w: Option<&WeatherData>) {
     let deg_cy = content_y + 30;
     draw_circle_outline(c, deg_cx, deg_cy, deg_r, 2, C::Red);
 
-    // Side info (condition + HI/LO).
+    // Side info (condition + HI/LO + next hourly slots).
     let side_x = deg_cx + deg_r + 12;
     let side_avail = panel.right() - 12 - side_x;
     if side_avail >= 70 {
@@ -381,6 +381,17 @@ fn draw_weather(c: &mut Canvas, w: Option<&WeatherData>) {
             C::Black,
             Align::Left,
         );
+        for (i, hour) in w.hourly.iter().take(3).enumerate() {
+            draw_text(
+                c,
+                &f_small(),
+                &format!("{} {}° {}", hour.time, hour.temp_c, hour.cond),
+                side_x,
+                content_y + 72 + (i as i32) * 14,
+                C::Black,
+                Align::Left,
+            );
+        }
     } else {
         draw_text(c, &f_body_bold(), &w.condition, temp_x, content_y + 122, C::Black, Align::Left);
         draw_text(
@@ -392,6 +403,17 @@ fn draw_weather(c: &mut Canvas, w: Option<&WeatherData>) {
             C::Black,
             Align::Left,
         );
+        for (i, hour) in w.hourly.iter().take(3).enumerate() {
+            draw_text(
+                c,
+                &f_small(),
+                &format!("{} {}° {}", hour.time, hour.temp_c, hour.cond),
+                temp_x,
+                content_y + 154 + (i as i32) * 14,
+                C::Black,
+                Align::Left,
+            );
+        }
     }
 
     // Forecast: 4-column grid pinned to bottom of panel.
@@ -905,21 +927,31 @@ fn clip_to_chars(s: &str, max_chars: usize) -> String {
 
 // ── OPS panel (tasks + alerts) ─────────────────────────────────────────────
 
-fn draw_ops(c: &mut Canvas, alerts: &[Alert]) {
+fn draw_ops(c: &mut Canvas, alerts: &[Alert], shipments_due_today: &[ShipmentHighlight]) {
     let panel = col3_bot();
     let content_y = draw_section_header(c, panel, "OPS", "// 05");
 
     let pad_x = 10;
     let alert_h = 14i32;
+    let mut y = content_y;
 
-    // Show as many alerts as fit between content_y and the panel bottom
-    // (with a small footer pad). Each row is alert_h tall.
+    if !shipments_due_today.is_empty() {
+        draw_text(c, &f_small_bold(), "DUE TODAY", panel.x + pad_x, y + 9, C::Red, Align::Left);
+        y += alert_h;
+        for shipment in shipments_due_today.iter().take(2) {
+            let label = clip_to_width(&f_small(), &shipment.remark, panel.w - 24);
+            draw_text(c, &f_small(), &label, panel.x + pad_x, y + 9, C::Black, Align::Left);
+            y += alert_h;
+        }
+        y += 2;
+    }
+
     let bottom_pad = 4i32;
-    let avail = (panel.bottom() - bottom_pad - content_y).max(0);
+    let avail = (panel.bottom() - bottom_pad - y).max(0);
     let max_alerts = (avail / alert_h).max(0) as usize;
 
     for (i, a) in alerts.iter().take(max_alerts).enumerate() {
-        let y = content_y + (i as i32) * alert_h;
+        let y = y + (i as i32) * alert_h;
         // Level pill
         let (bg, fg) = match a.level.as_str() {
             "ERR" => (C::Red, C::White),

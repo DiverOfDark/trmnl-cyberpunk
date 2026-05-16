@@ -42,12 +42,20 @@ pub struct WeatherDay {
     pub cond: String,
 }
 
+#[derive(Clone, Serialize)]
+pub struct WeatherHour {
+    pub time: String,
+    pub temp_c: i8,
+    pub cond: String,
+}
+
 #[derive(Clone, Default, Serialize)]
 pub struct WeatherData {
     pub temp_c: i8,
     pub condition: String,
     pub hi: i8,
     pub lo: i8,
+    pub hourly: Vec<WeatherHour>,
     pub forecast: Vec<WeatherDay>,
 }
 
@@ -93,6 +101,13 @@ pub struct Alert {
 }
 
 #[derive(Clone, Serialize)]
+pub struct ShipmentHighlight {
+    pub number: String,
+    pub remark: String,
+    pub status: String,
+}
+
+#[derive(Clone, Serialize)]
 pub struct DashData {
     pub time: String,
     pub date: String,
@@ -113,6 +128,7 @@ pub struct DashData {
     /// Same not-configured-vs-mocked-fallback semantics as `weather`.
     pub budget: Option<BudgetData>,
     pub alerts: Vec<Alert>,
+    pub shipments_due_today: Vec<ShipmentHighlight>,
 }
 
 /// Cyberpunk-corpo-PR mottos for the header banner. Cycled per render
@@ -222,6 +238,11 @@ impl DashData {
                 temp_c: 14,
                 condition: "RAIN".into(),
                 hi: 17, lo: 9,
+                hourly: vec![
+                    WeatherHour { time: "12:00".into(), temp_c: 14, cond: "RAIN".into() },
+                    WeatherHour { time: "15:00".into(), temp_c: 15, cond: "CLOUD".into() },
+                    WeatherHour { time: "18:00".into(), temp_c: 13, cond: "RAIN".into() },
+                ],
                 forecast: vec![
                     WeatherDay { day: "THU".into(), hi: 18, lo: 10, cond: "CLOUD".into() },
                     WeatherDay { day: "FRI".into(), hi: 21, lo: 11, cond: "SUN".into()   },
@@ -256,6 +277,9 @@ impl DashData {
                 Alert { level: "WRN".into(), time: "14:02".into(), message: "muspelheimr cpu_temp 71C > 65".into() },
                 Alert { level: "ERR".into(), time: "13:48".into(), message: "velero backup.daily failed rc=2".into() },
                 Alert { level: "WRN".into(), time: "09:14".into(), message: "fritzbox wan p95 142ms".into()         },
+            ],
+            shipments_due_today: vec![
+                ShipmentHighlight { number: "00340435063414124778".into(), remark: "SeeedStudio - reTerminal".into(), status: "Delivered today".into() },
             ],
         }
     }

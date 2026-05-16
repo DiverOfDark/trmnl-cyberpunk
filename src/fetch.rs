@@ -42,6 +42,7 @@ pub struct Sources {
     pub weather_lat: f64,
     pub weather_lon: f64,
     pub weather_tz: String,
+    pub seventeentrack_key: String,
 }
 
 impl Sources {
@@ -85,18 +86,20 @@ impl Sources {
                 .unwrap_or(13.33),
             weather_tz: std::env::var("WEATHER_TZ")
                 .unwrap_or_else(|_| "Europe/Berlin".into()),
+            seventeentrack_key: std::env::var("SEVENTEENTRACK_KEY").unwrap_or_default(),
         }
     }
 
     // Fetch all data concurrently; fall back to mock values per section on error.
     pub async fn fetch(&self, mock: &DashData) -> DashData {
-        let (hosts_r, cluster_r, weather_r, alerts_r, budget_r, agenda_r) = tokio::join!(
+        let (hosts_r, cluster_r, weather_r, alerts_r, budget_r, agenda_r, shipments_r) = tokio::join!(
             self.hosts(),
             self.cluster(),
             self.weather(),
             self.alerts(),
             self.budget(),
             self.agenda(),
+            self.shipments_due_today(),
         );
 
         // Per-section dispatch (no mock fallback — mock data only shows up
@@ -126,6 +129,10 @@ impl Sources {
         };
         let alerts = alerts_r.unwrap_or_else(|e| {
             warn_unless_unconfigured("alerts", &e);
+            Vec::new()
+        });
+        let shipments_due_today = shipments_r.unwrap_or_else(|e| {
+            warn_unless_unconfigured("shipments", &e);
             Vec::new()
         });
         let budget = match budget_r {
@@ -165,6 +172,7 @@ impl Sources {
             agenda,
             budget,
             alerts,
+            shipments_due_today,
         }
     }
 }
@@ -417,6 +425,7 @@ impl Sources {
             "https://api.open-meteo.com/v1/forecast\
              ?latitude={}&longitude={}&timezone={}\
              &current=temperature_2m,weather_code\
+             &hourly=temperature_2m,weather_code\
              &daily=weather_code,temperature_2m_max,temperature_2m_min\
              &forecast_days=5",
             self.weather_lat, self.weather_lon,
@@ -431,6 +440,16 @@ impl Sources {
         let temp_c    = cur["temperature_2m"].as_f64().unwrap_or(0.0).round() as i8;
         let cur_code  = cur["weather_code"].as_u64().unwrap_or(0);
         let condition = wmo_to_cond(cur_code).to_string();
+
+        let hourly_time: Vec<&str> = resp["hourly"]["time"].as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        let hourly_temp: Vec<f64> = resp["hourly"]["temperature_2m"].as_array()
+            .map(|a| a.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect())
+            .unwrap_or_default();
+        let hourly_code: Vec<u64> = resp["hourly"]["weather_code"].as_array()
+            .map(|a| a.iter().map(|v| v.as_u64().unwrap_or(0)).collect())
+            .unwrap_or_default();
 
         let times: Vec<&str> = daily["time"].as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
@@ -449,6 +468,28 @@ impl Sources {
         let today_lo = mins.first().copied().unwrap_or(0.0).round() as i8;
 
         // Skip today (index 0) for the forecast strip
+        let mut hourly = Vec::new();
+        let local_now = Local::now();
+        for (i, raw) in hourly_time.iter().enumerate() {
+            let Ok(naive) = NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M") else {
+                continue;
+            };
+            let Some(dt_local) = Local.from_local_datetime(&naive).single() else {
+                continue;
+            };
+            if dt_local.date_naive() != local_now.date_naive() || dt_local < local_now {
+                continue;
+            }
+            hourly.push(WeatherHour {
+                time: dt_local.format("%H:%M").to_string(),
+                temp_c: hourly_temp.get(i).copied().unwrap_or(0.0).round() as i8,
+                cond: wmo_to_cond(*hourly_code.get(i).unwrap_or(&0)).to_string(),
+            });
+            if hourly.len() >= 3 {
+                break;
+            }
+        }
+
         let forecast = times.iter().enumerate().skip(1).take(4).map(|(i, date)| {
             WeatherDay {
                 day:  dow_from_date(date).to_string(),
@@ -463,8 +504,44 @@ impl Sources {
             condition,
             hi: today_hi,
             lo: today_lo,
+            hourly,
             forecast,
         })
+    }
+
+    async fn shipments_due_today(&self) -> Result<Vec<ShipmentHighlight>> {
+        if self.seventeentrack_key.is_empty() {
+            return Err(NotConfigured("SEVENTEENTRACK_KEY").into());
+        }
+        let req_body = serde_json::json!({"page_no": 1, "package_state": 40});
+        let resp: Value = self.client
+            .post("https://api.17track.net/track/v2.4/gettracklist")
+            .header("17token", &self.seventeentrack_key)
+            .json(&req_body)
+            .send()
+            .await?
+            .json()
+            .await?;
+        let today = Local::now().date_naive();
+        let items = resp["data"]["accepted"].as_array().cloned().unwrap_or_default();
+        let mut out = Vec::new();
+        for item in items {
+            let Some(delivery_time) = item["delievery_time"].as_str() else { continue; };
+            let Ok(dt) = chrono::DateTime::parse_from_rfc3339(delivery_time) else { continue; };
+            let local = dt.with_timezone(&Local);
+            if local.date_naive() != today { continue; }
+            out.push(ShipmentHighlight {
+                number: item["number"].as_str().unwrap_or("").to_string(),
+                remark: item["remark"].as_str().filter(|s| !s.is_empty())
+                    .or_else(|| item["tag"].as_str().filter(|s| !s.is_empty()))
+                    .unwrap_or("Parcel due today")
+                    .to_string(),
+                status: item["latest_event_info"].as_str().filter(|s| !s.is_empty())
+                    .unwrap_or("Delivered today")
+                    .to_string(),
+            });
+        }
+        Ok(out)
     }
 }
 
