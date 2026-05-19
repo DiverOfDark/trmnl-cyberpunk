@@ -94,10 +94,11 @@ async fn refresh_data(state: &AppState) {
     let _guard = state.fetch_lock.lock().await;
 
     let mock = DashData::mock();
+    let cached_budget = state.data.read().await.budget.clone();
     let fresh = if state.local_mode {
         mock
     } else {
-        state.sources.fetch(&mock).await
+        state.sources.fetch(&mock, cached_budget).await
     };
     *state.data.write().await = fresh;
     info!("data refreshed");
@@ -170,7 +171,10 @@ async fn serve_png(State(state): State<AppState>) -> Response {
     match render_now(&state).await {
         Ok(bytes) => (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "no-cache")],
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
             bytes,
         )
             .into_response(),
@@ -214,7 +218,9 @@ async fn main() {
     } else {
         std::env::var("LISTEN").unwrap_or_else(|_| "0.0.0.0:8080".to_string())
     };
-    let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind failed");
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .expect("bind failed");
     let bound = listener.local_addr().unwrap();
 
     // Initial DashData uses mock so the layout has content until the first
@@ -223,24 +229,24 @@ async fn main() {
 
     let state = AppState {
         device_state: Arc::new(RwLock::new(DeviceState::default())),
-        data:         Arc::new(RwLock::new(initial_data)),
-        sources:      Arc::new(Sources::from_env()),
-        fetch_lock:   Arc::new(tokio::sync::Mutex::new(())),
+        data: Arc::new(RwLock::new(initial_data)),
+        sources: Arc::new(Sources::from_env()),
+        fetch_lock: Arc::new(tokio::sync::Mutex::new(())),
         local_mode,
     };
 
     let app = Router::new()
-        .route("/api/setup",      get(api_setup))
-        .route("/api/display",    get(api_display))
-        .route("/api/log",        post(api_log))
-        .route("/dashboard.png",  get(serve_png))
+        .route("/api/setup", get(api_setup))
+        .route("/api/display", get(api_display))
+        .route("/api/log", post(api_log))
+        .route("/dashboard.png", get(serve_png))
         // Cache-bustered URL for the firmware. `{epoch}` is just a marker
         // that changes whenever the rendered bytes do; the handler ignores
         // it and renders fresh either way. Slash-separated segments sidestep
         // axum-0.8's "no literals in a param segment" rule.
         .route("/dashboard/{epoch}", get(serve_png))
-        .route("/refresh",        get(force_refresh))
-        .route("/health",         get(health))
+        .route("/refresh", get(force_refresh))
+        .route("/health", get(health))
         .with_state(state.clone());
 
     if let Some(path) = render_to {
@@ -263,7 +269,14 @@ async fn main() {
         return;
     }
 
-    info!("Listening on http://{bound}{}", if local_mode { " (LOCAL_MODE: mock data only)" } else { "" });
+    info!(
+        "Listening on http://{bound}{}",
+        if local_mode {
+            " (LOCAL_MODE: mock data only)"
+        } else {
+            ""
+        }
+    );
     info!("Image    →  http://{bound}/dashboard.png");
     axum::serve(listener, app).await.expect("server error");
 }

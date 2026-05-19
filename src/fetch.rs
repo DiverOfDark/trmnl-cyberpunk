@@ -30,6 +30,16 @@ fn is_not_configured(e: &anyhow::Error) -> bool {
     e.downcast_ref::<NotConfigured>().is_some()
 }
 
+/// Keep the last good budget around when the Actual stack flakes. We prefer
+/// cached real data over the built-in mock so the panel stays stable instead
+/// of flickering back to placeholder numbers during transient outages.
+fn fallback_budget(
+    cached_budget: Option<BudgetData>,
+    mock_budget: Option<BudgetData>,
+) -> Option<BudgetData> {
+    cached_budget.or(mock_budget)
+}
+
 pub struct Sources {
     client: Client,
     pub prometheus: String,
@@ -91,13 +101,13 @@ impl Sources {
     }
 
     // Fetch all data concurrently; fall back to mock values per section on error.
-    pub async fn fetch(&self, mock: &DashData) -> DashData {
+    pub async fn fetch(&self, mock: &DashData, cached_budget: Option<BudgetData>) -> DashData {
         let (hosts_r, cluster_r, weather_r, alerts_r, budget_r, agenda_r, shipments_r) = tokio::join!(
             self.hosts(),
             self.cluster(),
             self.weather(),
             self.alerts(),
-            self.budget(),
+            tokio::time::timeout(Duration::from_secs(2), self.budget()),
             self.agenda(),
             self.shipments_due_today(),
         );
@@ -121,11 +131,17 @@ impl Sources {
         });
         let cluster = match cluster_r {
             Ok(c) => Some(c),
-            Err(e) => { warn_unless_unconfigured("cluster", &e); None }
+            Err(e) => {
+                warn_unless_unconfigured("cluster", &e);
+                None
+            }
         };
         let weather = match weather_r {
             Ok(w) => Some(w),
-            Err(e) => { warn_unless_unconfigured("weather", &e); None }
+            Err(e) => {
+                warn_unless_unconfigured("weather", &e);
+                None
+            }
         };
         let alerts = alerts_r.unwrap_or_else(|e| {
             warn_unless_unconfigured("alerts", &e);
@@ -136,8 +152,19 @@ impl Sources {
             Vec::new()
         });
         let budget = match budget_r {
-            Ok(b) => Some(b),
-            Err(e) => { warn_unless_unconfigured("budget", &e); None }
+            Ok(Ok(b)) => Some(b),
+            Ok(Err(e)) => {
+                if is_not_configured(&e) {
+                    None
+                } else {
+                    warn_unless_unconfigured("budget", &e);
+                    fallback_budget(cached_budget.clone(), mock.budget.clone())
+                }
+            }
+            Err(_) => {
+                warn!("budget fetch timed out after 2s; keeping cached budget if available");
+                fallback_budget(cached_budget.clone(), mock.budget.clone())
+            }
         };
         let agenda = agenda_r.unwrap_or_else(|e| {
             warn_unless_unconfigured("agenda", &e);
@@ -146,17 +173,22 @@ impl Sources {
 
         let now = Local::now();
         let months = [
-            "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
-            "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+            "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
         ];
         let dow = match now.weekday() {
-            Weekday::Sun => "SUN", Weekday::Mon => "MON", Weekday::Tue => "TUE",
-            Weekday::Wed => "WED", Weekday::Thu => "THU", Weekday::Fri => "FRI",
+            Weekday::Sun => "SUN",
+            Weekday::Mon => "MON",
+            Weekday::Tue => "TUE",
+            Weekday::Wed => "WED",
+            Weekday::Thu => "THU",
+            Weekday::Fri => "FRI",
             Weekday::Sat => "SAT",
         };
         let month = months[(now.month() - 1) as usize];
         let refresh_secs: i64 = std::env::var("REFRESH_SECS")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(3600);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3600);
         let next = now + chrono::Duration::seconds(refresh_secs);
 
         DashData {
@@ -195,7 +227,8 @@ async fn prom_query(client: &Client, base: &str, query: &str) -> Result<Vec<(Str
 
     let mut out = Vec::new();
     for r in results {
-        let instance = r["metric"]["instance"].as_str()
+        let instance = r["metric"]["instance"]
+            .as_str()
             .or_else(|| r["metric"]["node"].as_str())
             .unwrap_or("unknown");
         let host = instance.split(':').next().unwrap_or(instance).to_string();
@@ -252,19 +285,43 @@ impl Sources {
             return Err(NotConfigured("PROMETHEUS_URL").into());
         }
         let (
-            cpu_r, temp_r, ram_r, disk_r, uptime_r, l1_r, l5_r, l15_r, uname_r,
-            ram_used_r, ram_total_r,
+            cpu_r,
+            temp_r,
+            ram_r,
+            disk_r,
+            uptime_r,
+            l1_r,
+            l5_r,
+            l15_r,
+            uname_r,
+            ram_used_r,
+            ram_total_r,
         ) = tokio::join!(
-            prom_query(&self.client, &self.prometheus,
-                r#"100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)"#),
-            prom_query(&self.client, &self.prometheus,
-                r#"avg by(instance) (node_hwmon_temp_celsius{chip=~".*coretemp.*|.*k10temp.*|.*zenpower.*"})"#),
-            prom_query(&self.client, &self.prometheus,
-                r#"100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)"#),
-            prom_query(&self.client, &self.prometheus,
-                r#"100 * (1 - node_filesystem_avail_bytes{mountpoint="/",fstype!~"rootfs|tmpfs"} / node_filesystem_size_bytes{mountpoint="/",fstype!~"rootfs|tmpfs"})"#),
-            prom_query(&self.client, &self.prometheus,
-                r#"(time() - node_boot_time_seconds) / 86400"#),
+            prom_query(
+                &self.client,
+                &self.prometheus,
+                r#"100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)"#
+            ),
+            prom_query(
+                &self.client,
+                &self.prometheus,
+                r#"avg by(instance) (node_hwmon_temp_celsius{chip=~".*coretemp.*|.*k10temp.*|.*zenpower.*"})"#
+            ),
+            prom_query(
+                &self.client,
+                &self.prometheus,
+                r#"100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)"#
+            ),
+            prom_query(
+                &self.client,
+                &self.prometheus,
+                r#"100 * (1 - node_filesystem_avail_bytes{mountpoint="/",fstype!~"rootfs|tmpfs"} / node_filesystem_size_bytes{mountpoint="/",fstype!~"rootfs|tmpfs"})"#
+            ),
+            prom_query(
+                &self.client,
+                &self.prometheus,
+                r#"(time() - node_boot_time_seconds) / 86400"#
+            ),
             prom_query(&self.client, &self.prometheus, "node_load1"),
             prom_query(&self.client, &self.prometheus, "node_load5"),
             prom_query(&self.client, &self.prometheus, "node_load15"),
@@ -272,26 +329,31 @@ impl Sources {
             // hostnames via node_uname_info's `nodename` label so the panel
             // shows "asgard" instead of "192.168.1.10".
             prom_label_pairs(
-                &self.client, &self.prometheus,
-                "node_uname_info", "nodename",
+                &self.client,
+                &self.prometheus,
+                "node_uname_info",
+                "nodename",
             ),
             // Per-host RAM in bytes — used to render "1.6G/16G" in the
             // detail rows where absolute usage reads better than %.
-            prom_query(&self.client, &self.prometheus,
-                "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes"),
+            prom_query(
+                &self.client,
+                &self.prometheus,
+                "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes"
+            ),
             prom_query(&self.client, &self.prometheus, "node_memory_MemTotal_bytes"),
         );
 
-        let cpu_map    = to_map(cpu_r.unwrap_or_default());
-        let temp_map   = to_map(temp_r.unwrap_or_default());
-        let ram_map    = to_map(ram_r.unwrap_or_default());
-        let disk_map   = to_map(disk_r.unwrap_or_default());
+        let cpu_map = to_map(cpu_r.unwrap_or_default());
+        let temp_map = to_map(temp_r.unwrap_or_default());
+        let ram_map = to_map(ram_r.unwrap_or_default());
+        let disk_map = to_map(disk_r.unwrap_or_default());
         let uptime_map = to_map(uptime_r.unwrap_or_default());
-        let l1_map     = to_map(l1_r.unwrap_or_default());
-        let l5_map     = to_map(l5_r.unwrap_or_default());
-        let l15_map    = to_map(l15_r.unwrap_or_default());
+        let l1_map = to_map(l1_r.unwrap_or_default());
+        let l5_map = to_map(l5_r.unwrap_or_default());
+        let l15_map = to_map(l15_r.unwrap_or_default());
         let uname_map: HashMap<String, String> = uname_r.unwrap_or_default().into_iter().collect();
-        let ram_used_map  = to_map(ram_used_r.unwrap_or_default());
+        let ram_used_map = to_map(ram_used_r.unwrap_or_default());
         let ram_total_map = to_map(ram_total_r.unwrap_or_default());
 
         // Union of all known instances (prefer uptime as the canonical set)
@@ -311,12 +373,12 @@ impl Sources {
                 let display_name = uname_map.get(&key).cloned().unwrap_or_else(|| key.clone());
                 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
                 HostData {
-                    cpu:         cpu_map.get(&key).copied().unwrap_or(0.0).round() as u8,
-                    cpu_temp:    temp_map.get(&key).copied().unwrap_or(0.0).round() as u8,
-                    ram_pct:     ram_map.get(&key).copied().unwrap_or(0.0).round() as u8,
-                    ram_used_gib:  (ram_used_map.get(&key).copied().unwrap_or(0.0) / GIB) as f32,
+                    cpu: cpu_map.get(&key).copied().unwrap_or(0.0).round() as u8,
+                    cpu_temp: temp_map.get(&key).copied().unwrap_or(0.0).round() as u8,
+                    ram_pct: ram_map.get(&key).copied().unwrap_or(0.0).round() as u8,
+                    ram_used_gib: (ram_used_map.get(&key).copied().unwrap_or(0.0) / GIB) as f32,
                     ram_total_gib: (ram_total_map.get(&key).copied().unwrap_or(0.0) / GIB) as f32,
-                    disk_pct:    disk_map.get(&key).copied().unwrap_or(0.0).round() as u8,
+                    disk_pct: disk_map.get(&key).copied().unwrap_or(0.0).round() as u8,
                     uptime_days: uptime_map.get(&key).copied().unwrap_or(0.0) as u32,
                     load: [
                         l1_map.get(&key).copied().unwrap_or(0.0) as f32,
@@ -365,7 +427,8 @@ impl Sources {
         // so the panel renders as unavailable instead of falsely reading
         // "0% / 0% / 0%" — that's mock-shaped data dressed up as real.
         if cpu_r.is_err() && ram_r.is_err() && disk_r.is_err() {
-            return Err(cpu_r.err()
+            return Err(cpu_r
+                .err()
                 .or_else(|| ram_r.err())
                 .or_else(|| disk_r.err())
                 .unwrap_or_else(|| anyhow!("all cluster queries failed")));
@@ -382,12 +445,16 @@ impl Sources {
                 .unwrap_or(0.0)
         };
         let to_pct = |v: f64| -> u8 {
-            if v.is_nan() || v.is_infinite() { 0 } else { v.clamp(0.0, 100.0).round() as u8 }
+            if v.is_nan() || v.is_infinite() {
+                0
+            } else {
+                v.clamp(0.0, 100.0).round() as u8
+            }
         };
 
         Ok(ClusterMetrics {
-            cpu_pct:  to_pct(pick(cpu_r)),
-            ram_pct:  to_pct(pick(ram_r)),
+            cpu_pct: to_pct(pick(cpu_r)),
+            ram_pct: to_pct(pick(ram_r)),
             disk_pct: to_pct(pick(disk_r)),
         })
     }
@@ -397,24 +464,30 @@ impl Sources {
 
 fn wmo_to_cond(code: u64) -> &'static str {
     match code {
-        0..=1           => "SUN",
-        2..=3           => "CLOUD",
-        45..=48         => "FOG",
-        51..=67         => "RAIN",
-        71..=77         => "SNOW",
-        80..=82         => "RAIN",
-        85..=86         => "SNOW",
-        95..=99         => "STORM",
-        _               => "CLOUD",
+        0..=1 => "SUN",
+        2..=3 => "CLOUD",
+        45..=48 => "FOG",
+        51..=67 => "RAIN",
+        71..=77 => "SNOW",
+        80..=82 => "RAIN",
+        85..=86 => "SNOW",
+        95..=99 => "STORM",
+        _ => "CLOUD",
     }
 }
 
 fn dow_from_date(date_str: &str) -> &'static str {
     use chrono::NaiveDate;
-    let Ok(d) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") else { return "---" };
+    let Ok(d) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") else {
+        return "---";
+    };
     match d.weekday() {
-        Weekday::Sun => "SUN", Weekday::Mon => "MON", Weekday::Tue => "TUE",
-        Weekday::Wed => "WED", Weekday::Thu => "THU", Weekday::Fri => "FRI",
+        Weekday::Sun => "SUN",
+        Weekday::Mon => "MON",
+        Weekday::Tue => "TUE",
+        Weekday::Wed => "WED",
+        Weekday::Thu => "THU",
+        Weekday::Fri => "FRI",
         Weekday::Sat => "SAT",
     }
 }
@@ -428,39 +501,47 @@ impl Sources {
              &hourly=temperature_2m,weather_code\
              &daily=weather_code,temperature_2m_max,temperature_2m_min\
              &forecast_days=5",
-            self.weather_lat, self.weather_lon,
+            self.weather_lat,
+            self.weather_lon,
             urlencoding::encode(&self.weather_tz),
         );
 
         let resp: Value = self.client.get(&url).send().await?.json().await?;
 
-        let cur  = &resp["current"];
+        let cur = &resp["current"];
         let daily = &resp["daily"];
 
-        let temp_c    = cur["temperature_2m"].as_f64().unwrap_or(0.0).round() as i8;
-        let cur_code  = cur["weather_code"].as_u64().unwrap_or(0);
+        let temp_c = cur["temperature_2m"].as_f64().unwrap_or(0.0).round() as i8;
+        let cur_code = cur["weather_code"].as_u64().unwrap_or(0);
         let condition = wmo_to_cond(cur_code).to_string();
 
-        let hourly_time: Vec<&str> = resp["hourly"]["time"].as_array()
+        let hourly_time: Vec<&str> = resp["hourly"]["time"]
+            .as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
-        let hourly_temp: Vec<f64> = resp["hourly"]["temperature_2m"].as_array()
+        let hourly_temp: Vec<f64> = resp["hourly"]["temperature_2m"]
+            .as_array()
             .map(|a| a.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect())
             .unwrap_or_default();
-        let hourly_code: Vec<u64> = resp["hourly"]["weather_code"].as_array()
+        let hourly_code: Vec<u64> = resp["hourly"]["weather_code"]
+            .as_array()
             .map(|a| a.iter().map(|v| v.as_u64().unwrap_or(0)).collect())
             .unwrap_or_default();
 
-        let times: Vec<&str> = daily["time"].as_array()
+        let times: Vec<&str> = daily["time"]
+            .as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
-        let codes:  Vec<u64> = daily["weather_code"].as_array()
+        let codes: Vec<u64> = daily["weather_code"]
+            .as_array()
             .map(|a| a.iter().map(|v| v.as_u64().unwrap_or(0)).collect())
             .unwrap_or_default();
-        let maxs: Vec<f64> = daily["temperature_2m_max"].as_array()
+        let maxs: Vec<f64> = daily["temperature_2m_max"]
+            .as_array()
             .map(|a| a.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect())
             .unwrap_or_default();
-        let mins: Vec<f64> = daily["temperature_2m_min"].as_array()
+        let mins: Vec<f64> = daily["temperature_2m_min"]
+            .as_array()
             .map(|a| a.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect())
             .unwrap_or_default();
 
@@ -490,14 +571,18 @@ impl Sources {
             }
         }
 
-        let forecast = times.iter().enumerate().skip(1).take(4).map(|(i, date)| {
-            WeatherDay {
-                day:  dow_from_date(date).to_string(),
-                hi:   maxs.get(i).copied().unwrap_or(0.0).round() as i8,
-                lo:   mins.get(i).copied().unwrap_or(0.0).round() as i8,
+        let forecast = times
+            .iter()
+            .enumerate()
+            .skip(1)
+            .take(4)
+            .map(|(i, date)| WeatherDay {
+                day: dow_from_date(date).to_string(),
+                hi: maxs.get(i).copied().unwrap_or(0.0).round() as i8,
+                lo: mins.get(i).copied().unwrap_or(0.0).round() as i8,
                 cond: wmo_to_cond(*codes.get(i).unwrap_or(&0)).to_string(),
-            }
-        }).collect();
+            })
+            .collect();
 
         Ok(WeatherData {
             temp_c,
@@ -513,13 +598,11 @@ impl Sources {
         if self.trackhound_base_url.is_empty() {
             return Err(NotConfigured("TRACKHOUND_BASE_URL").into());
         }
-        let url = format!("{}/shipments", self.trackhound_base_url.trim_end_matches('/'));
-        let items: Vec<Value> = self.client
-            .get(&url)
-            .send()
-            .await?
-            .json()
-            .await?;
+        let url = format!(
+            "{}/shipments",
+            self.trackhound_base_url.trim_end_matches('/')
+        );
+        let items: Vec<Value> = self.client.get(&url).send().await?.json().await?;
         let today = Local::now().date_naive();
         let mut out = Vec::new();
         for item in items {
@@ -530,21 +613,35 @@ impl Sources {
                 .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
                 .map(|d| d == today)
                 .unwrap_or(false);
-            if !is_out_for_delivery && !expected_today { continue; }
+            if !is_out_for_delivery && !expected_today {
+                continue;
+            }
             // Skip terminal/unknown states even if the date happens to match.
-            if matches!(status, "delivered" | "failed" | "unknown") { continue; }
-            let number = item["tracking_number"].as_str().filter(|s| !s.is_empty())
+            if matches!(status, "delivered" | "failed" | "unknown") {
+                continue;
+            }
+            let number = item["tracking_number"]
+                .as_str()
+                .filter(|s| !s.is_empty())
                 .or_else(|| item["order_number"].as_str().filter(|s| !s.is_empty()))
                 .unwrap_or("")
                 .to_string();
-            let remark = item["title"].as_str().filter(|s| !s.is_empty())
+            let remark = item["title"]
+                .as_str()
+                .filter(|s| !s.is_empty())
                 .or_else(|| item["merchant"].as_str().filter(|s| !s.is_empty()))
                 .unwrap_or("Parcel due today")
                 .to_string();
-            let status_text = item["last_event_text"].as_str().filter(|s| !s.is_empty())
+            let status_text = item["last_event_text"]
+                .as_str()
+                .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| humanize_status(status));
-            out.push(ShipmentHighlight { number, remark, status: status_text });
+            out.push(ShipmentHighlight {
+                number,
+                remark,
+                status: status_text,
+            });
         }
         Ok(out)
     }
@@ -553,10 +650,10 @@ impl Sources {
 fn humanize_status(s: &str) -> String {
     match s {
         "out_for_delivery" => "Out for delivery".into(),
-        "in_transit"       => "In transit".into(),
-        "registered"       => "Registered".into(),
-        "detected"         => "Detected".into(),
-        _                  => "Delivered today".into(),
+        "in_transit" => "In transit".into(),
+        "registered" => "Registered".into(),
+        "detected" => "Detected".into(),
+        _ => "Delivered today".into(),
     }
 }
 
@@ -567,10 +664,14 @@ impl Sources {
         if self.alertmanager.is_empty() {
             return Err(NotConfigured("ALERTMANAGER_URL").into());
         }
-        let url = format!("{}/api/v2/alerts?silenced=false&inhibited=false", self.alertmanager);
+        let url = format!(
+            "{}/api/v2/alerts?silenced=false&inhibited=false",
+            self.alertmanager
+        );
         let resp: Value = self.client.get(&url).send().await?.json().await?;
 
-        let arr = resp.as_array()
+        let arr = resp
+            .as_array()
             .ok_or_else(|| anyhow!("alertmanager response not array"))?;
 
         let mut alerts: Vec<Alert> = arr
@@ -590,8 +691,9 @@ impl Sources {
                 let severity = a["labels"]["severity"].as_str().unwrap_or("warning");
                 let level = match severity {
                     "critical" | "error" => "ERR",
-                    _                    => "WRN",
-                }.to_string();
+                    _ => "WRN",
+                }
+                .to_string();
 
                 let starts_at = a["startsAt"].as_str().unwrap_or("");
                 let time = chrono::DateTime::parse_from_rfc3339(starts_at)
@@ -603,7 +705,8 @@ impl Sources {
                 // when available so duplicate alertname rows still convey
                 // *which* target is down.
                 let alertname = a["labels"]["alertname"].as_str().unwrap_or("");
-                let target = a["labels"]["instance"].as_str()
+                let target = a["labels"]["instance"]
+                    .as_str()
                     .or_else(|| a["labels"]["pod"].as_str())
                     .or_else(|| a["labels"]["namespace"].as_str())
                     .unwrap_or("");
@@ -616,21 +719,29 @@ impl Sources {
                         .as_str()
                         .or_else(|| a["annotations"]["description"].as_str())
                         .unwrap_or("unknown alert")
-                        .chars().take(60).collect()
+                        .chars()
+                        .take(60)
+                        .collect()
                 };
 
-                Alert { level, time, message }
+                Alert {
+                    level,
+                    time,
+                    message,
+                }
             })
             // Render-side caps at panel-fit; this is just a sanity bound.
             .take(20)
             .collect();
 
         // Sort: ERR first, then WRN.
-        alerts.sort_by_key(|a| match a.level.as_str() { "ERR" => 0, _ => 1 });
+        alerts.sort_by_key(|a| match a.level.as_str() {
+            "ERR" => 0,
+            _ => 1,
+        });
         Ok(alerts)
     }
 }
-
 
 // ── Retry helper ──────────────────────────────────────────────────────────
 
@@ -722,7 +833,7 @@ impl Sources {
             return Err(NotConfigured("ACTUALBUDGET_SYNC_ID").into());
         }
 
-        let now   = Local::now();
+        let now = Local::now();
         let month = format!("{}-{:02}", now.year(), now.month());
         let month_start = format!("{:04}-{:02}-01", now.year(), now.month());
 
@@ -734,7 +845,12 @@ impl Sources {
             self.actualbudget_url, self.actualbudget_sync_id, month,
         );
         let (month_r, txn_counts_r) = tokio::join!(
-            get_json(&self.client, &month_url, &self.actualbudget_key, &self.actualbudget_password),
+            get_json(
+                &self.client,
+                &month_url,
+                &self.actualbudget_key,
+                &self.actualbudget_password
+            ),
             self.transaction_counts_by_category(&month_start),
         );
         let month_data: Value = month_r?;
@@ -753,13 +869,13 @@ impl Sources {
         for group in &cats_raw {
             if let Some(cat_list) = group["categories"].as_array() {
                 for cat in cat_list {
-                    let id    = cat["id"].as_str().unwrap_or("");
-                    let name  = cat["name"].as_str().unwrap_or("?");
+                    let id = cat["id"].as_str().unwrap_or("");
+                    let name = cat["name"].as_str().unwrap_or("?");
                     let spent = (cat["spent"].as_f64().unwrap_or(0.0).abs() / 100.0).round() as u32;
-                    let cap   = (cat["budgeted"].as_f64().unwrap_or(0.0) / 100.0).round() as u32;
+                    let cap = (cat["budgeted"].as_f64().unwrap_or(0.0) / 100.0).round() as u32;
                     if cap > 0 || spent > 0 {
                         total_spent += spent;
-                        total_cap   += cap;
+                        total_cap += cap;
                         let count = tx_counts.get(id).copied().unwrap_or(0);
                         cats.push(BudgetCat {
                             label: name.to_string(),
@@ -781,10 +897,21 @@ impl Sources {
         // it pick what to display.
         cats.sort_by_key(|c| std::cmp::Reverse(c.cap));
 
-        let months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
-        let month_label = format!("{} '{}", months[(now.month()-1) as usize], &now.format("%Y").to_string()[2..]);
+        let months = [
+            "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+        ];
+        let month_label = format!(
+            "{} '{}",
+            months[(now.month() - 1) as usize],
+            &now.format("%Y").to_string()[2..]
+        );
 
-        Ok(BudgetData { month_label, spent: total_spent, cap: total_cap, cats })
+        Ok(BudgetData {
+            month_label,
+            spent: total_spent,
+            cap: total_cap,
+            cats,
+        })
     }
 
     /// Run an ActualQL query that groups transactions by category for the
@@ -810,7 +937,8 @@ impl Sources {
             }
         });
         let v: Value = with_retry(&format!("POST {url}"), 3, || async {
-            let mut req = self.client
+            let mut req = self
+                .client
                 .post(&url)
                 .header("x-api-key", &self.actualbudget_key)
                 .json(&body);
@@ -902,22 +1030,22 @@ fn parse_ical_events(content: &str, today: NaiveDate) -> Vec<AgendaItem> {
         if !vevent_block.contains("END:VEVENT") {
             continue;
         }
-        let block = &vevent_block[..vevent_block.find("END:VEVENT").unwrap_or(vevent_block.len())];
+        let block = &vevent_block[..vevent_block
+            .find("END:VEVENT")
+            .unwrap_or(vevent_block.len())];
 
-        let summary    = ical_field(block, "SUMMARY").unwrap_or_default();
+        let summary = ical_field(block, "SUMMARY").unwrap_or_default();
         let categories = ical_field_value(block, "CATEGORIES").unwrap_or_default();
-        let Some((tzid, dtstart)) = ical_dtstart(block) else { continue };
+        let Some((tzid, dtstart)) = ical_dtstart(block) else {
+            continue;
+        };
         let rrule_value = ical_field_value(block, "RRULE").unwrap_or_default();
         // Duration: prefer DURATION (PT1H30M etc.); fall back to DTEND −
         // DTSTART. Empty when neither is supplied or for all-day events.
         let duration_str = ical_field_value(block, "DURATION").unwrap_or_default();
         let dtend_value = ical_dtend(block).unwrap_or_default();
-        let duration_minutes = compute_duration_minutes(
-            &duration_str,
-            &dtstart,
-            &dtend_value,
-            tzid.as_deref(),
-        );
+        let duration_minutes =
+            compute_duration_minutes(&duration_str, &dtstart, &dtend_value, tzid.as_deref());
 
         if summary.is_empty() || dtstart.is_empty() {
             continue;
@@ -947,8 +1075,15 @@ fn parse_ical_events(content: &str, today: NaiveDate) -> Vec<AgendaItem> {
         }
 
         let tag = if !categories.is_empty() {
-            categories.split(',').next().unwrap_or("").trim()
-                .chars().take(4).collect::<String>().to_uppercase()
+            categories
+                .split(',')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(4)
+                .collect::<String>()
+                .to_uppercase()
         } else {
             "PERS".to_string()
         };
@@ -994,14 +1129,19 @@ fn expand_rrule_for_day(
     // Resolve the calendar timezone for both the DTSTART and the day-window
     // we'll expand against. Default to Local when no TZID was given.
     let resolved_tz: Option<chrono_tz::Tz> = tzid.and_then(|t| {
-        t.parse::<chrono_tz::Tz>().ok()
+        t.parse::<chrono_tz::Tz>()
+            .ok()
             .or_else(|| crate::windows_tz::windows_to_iana(t).and_then(|n| n.parse().ok()))
     });
 
     // Build the canonical DTSTART line for the rrule parser.
     let dtstart_line = match (resolved_tz, dtstart_value.ends_with('Z')) {
-        (Some(tz), _) => format!("DTSTART;TZID={}:{}", tz.name(), dtstart_value.trim_end_matches('Z')),
-        (None, true)  => format!("DTSTART:{}", dtstart_value),
+        (Some(tz), _) => format!(
+            "DTSTART;TZID={}:{}",
+            tz.name(),
+            dtstart_value.trim_end_matches('Z')
+        ),
+        (None, true) => format!("DTSTART:{}", dtstart_value),
         (None, false) => format!("DTSTART:{}", dtstart_value),
     };
     let combined = format!("{dtstart_line}\nRRULE:{rrule_value}");
@@ -1012,7 +1152,7 @@ fn expand_rrule_for_day(
     // Bracket today in the resolved timezone (or local). `all_between` wants
     // `chrono::DateTime<rrule::Tz>`, so convert via the local-date naive.
     let day_start_naive = today.and_hms_opt(0, 0, 0).unwrap_or_default();
-    let day_end_naive   = today
+    let day_end_naive = today
         .succ_opt()
         .and_then(|d| d.and_hms_opt(0, 0, 0))
         .unwrap_or_default();
@@ -1021,7 +1161,10 @@ fn expand_rrule_for_day(
             let s = tz.from_local_datetime(&day_start_naive).single();
             let e = tz.from_local_datetime(&day_end_naive).single();
             match (s, e) {
-                (Some(s), Some(e)) => (s.with_timezone(&rrule::Tz::UTC), e.with_timezone(&rrule::Tz::UTC)),
+                (Some(s), Some(e)) => (
+                    s.with_timezone(&rrule::Tz::UTC),
+                    e.with_timezone(&rrule::Tz::UTC),
+                ),
                 _ => return Vec::new(),
             }
         }
@@ -1029,7 +1172,10 @@ fn expand_rrule_for_day(
             let s = Local.from_local_datetime(&day_start_naive).single();
             let e = Local.from_local_datetime(&day_end_naive).single();
             match (s, e) {
-                (Some(s), Some(e)) => (s.with_timezone(&rrule::Tz::UTC), e.with_timezone(&rrule::Tz::UTC)),
+                (Some(s), Some(e)) => (
+                    s.with_timezone(&rrule::Tz::UTC),
+                    e.with_timezone(&rrule::Tz::UTC),
+                ),
                 _ => return Vec::new(),
             }
         }
@@ -1060,7 +1206,7 @@ fn ical_field(block: &str, key: &str) -> Option<String> {
 
 fn ical_field_value(block: &str, key: &str) -> Option<String> {
     // Matches "KEY:value" OR "KEY;param=...:value", returns the value only.
-    let exact    = format!("{}:", key);
+    let exact = format!("{}:", key);
     let prefixed = format!("{};", key);
     for line in block.lines() {
         if line.starts_with(&exact) {
@@ -1106,9 +1252,10 @@ fn ical_dtstart(block: &str) -> Option<(Option<String>, String)> {
         if let Some(rest) = line.strip_prefix("DTSTART;") {
             let colon = rest.find(':')?;
             let params = &rest[..colon];
-            let value  = &rest[colon + 1..];
+            let value = &rest[colon + 1..];
             let tzid = params.split(';').find_map(|p| {
-                p.strip_prefix("TZID=").map(|v| v.trim_matches('"').to_string())
+                p.strip_prefix("TZID=")
+                    .map(|v| v.trim_matches('"').to_string())
             });
             return Some((tzid, value.to_string()));
         }
@@ -1149,7 +1296,9 @@ fn compute_duration_minutes(
     let start = parse_ical_dtstart(dtstart_value, tzid)?.0;
     let end = parse_ical_dtstart(dtend_value, tzid)?.0;
     let secs = (end - start).num_seconds();
-    if secs <= 0 { return None; }
+    if secs <= 0 {
+        return None;
+    }
     Some((secs / 60) as u32)
 }
 
@@ -1159,7 +1308,9 @@ fn compute_duration_minutes(
 /// emits days+time only for VEVENT durations).
 fn parse_iso8601_duration_minutes(s: &str) -> Option<u32> {
     let s = s.trim();
-    if s.is_empty() { return None; }
+    if s.is_empty() {
+        return None;
+    }
     let s = s.strip_prefix('-').unwrap_or(s);
     let mut rest = s.strip_prefix('P')?;
     let mut total_min: u32 = 0;
@@ -1237,7 +1388,10 @@ fn parse_ical_dtstart(value: &str, tzid: Option<&str>) -> Option<(chrono::DateTi
                 crate::windows_tz::windows_to_iana(tz_str).and_then(|iana| iana.parse().ok())
             });
             match resolved {
-                Some(tz) => tz.from_local_datetime(&naive).single()?.with_timezone(&Local),
+                Some(tz) => tz
+                    .from_local_datetime(&naive)
+                    .single()?
+                    .with_timezone(&Local),
                 None => {
                     warn!("unknown TZID '{tz_str}', treating as local");
                     Local.from_local_datetime(&naive).single()?
@@ -1258,6 +1412,15 @@ fn parse_ical_dtstart(value: &str, tzid: Option<&str>) -> Option<(chrono::DateTi
 mod tests {
     use super::*;
 
+    fn budget(label: &str, spent: u32, cap: u32) -> BudgetData {
+        BudgetData {
+            month_label: label.into(),
+            spent,
+            cap,
+            cats: Vec::new(),
+        }
+    }
+
     /// Daily recurring meeting that started 2 days ago should appear today.
     #[test]
     fn rrule_daily_appears_today() {
@@ -1266,9 +1429,12 @@ mod tests {
             "{}T100000Z",
             (today - chrono::Duration::days(2)).format("%Y%m%d"),
         );
-        let occurrences =
-            expand_rrule_for_day(&dtstart_value, None, "FREQ=DAILY", today);
-        assert_eq!(occurrences.len(), 1, "expected exactly one occurrence today");
+        let occurrences = expand_rrule_for_day(&dtstart_value, None, "FREQ=DAILY", today);
+        assert_eq!(
+            occurrences.len(),
+            1,
+            "expected exactly one occurrence today"
+        );
         assert_eq!(occurrences[0].date_naive(), today);
     }
 
@@ -1293,7 +1459,10 @@ mod tests {
         );
         let rule = format!("FREQ=WEEKLY;BYDAY={day}");
         let occurrences = expand_rrule_for_day(&dtstart_value, None, &rule, today);
-        assert!(!occurrences.is_empty(), "expected weekly recurrence to land today");
+        assert!(
+            !occurrences.is_empty(),
+            "expected weekly recurrence to land today"
+        );
     }
 
     /// Daily series that ended yesterday should NOT appear today.
@@ -1301,10 +1470,26 @@ mod tests {
     fn rrule_until_excludes_after_end() {
         let today = Local::now().date_naive();
         let yesterday = today - chrono::Duration::days(1);
-        let dtstart_value = format!("{}T100000Z", (today - chrono::Duration::days(10)).format("%Y%m%d"));
+        let dtstart_value = format!(
+            "{}T100000Z",
+            (today - chrono::Duration::days(10)).format("%Y%m%d")
+        );
         let rule = format!("FREQ=DAILY;UNTIL={}T235959Z", yesterday.format("%Y%m%d"));
         let occurrences = expand_rrule_for_day(&dtstart_value, None, &rule, today);
         assert!(occurrences.is_empty(), "ended series shouldn't appear");
+    }
+
+    /// When Actual is flaky, keep the last known budget instead of dropping
+    /// the panel back to the mock/default state.
+    #[test]
+    fn cached_budget_wins_over_mock_budget() {
+        let cached = budget("cached", 12, 34);
+        let mock = budget("mock", 1, 2);
+        let chosen = fallback_budget(Some(cached.clone()), Some(mock));
+        assert_eq!(
+            chosen.expect("cached budget should win").month_label,
+            cached.month_label
+        );
     }
 }
 
@@ -1318,8 +1503,16 @@ mod urlencoding {
                 out.push(b as char);
             } else {
                 out.push('%');
-                out.push(char::from_digit((b >> 4) as u32, 16).unwrap().to_ascii_uppercase());
-                out.push(char::from_digit((b & 0xf) as u32, 16).unwrap().to_ascii_uppercase());
+                out.push(
+                    char::from_digit((b >> 4) as u32, 16)
+                        .unwrap()
+                        .to_ascii_uppercase(),
+                );
+                out.push(
+                    char::from_digit((b & 0xf) as u32, 16)
+                        .unwrap()
+                        .to_ascii_uppercase(),
+                );
             }
         }
         out
