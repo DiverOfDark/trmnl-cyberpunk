@@ -30,6 +30,11 @@ services:
       # ActualBudget HTTP API — leave blank to use mock budget
       ACTUALBUDGET_URL: ""
       ACTUALBUDGET_KEY: ""
+      # Optional: classify budget envelopes by category-group name (comma-
+      # separated, case-insensitive substrings). Blank → built-in defaults.
+      ACTUALBUDGET_FIXED_GROUPS: ""
+      ACTUALBUDGET_VARIABLE_GROUPS: ""
+      ACTUALBUDGET_SAVINGS_GROUPS: ""
 
       # Weather location (Open-Meteo, no key needed)
       WEATHER_LAT: "52.50"

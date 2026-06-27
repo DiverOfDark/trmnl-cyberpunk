@@ -811,79 +811,106 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
 
     let pad_x = 10i32;
 
-    // ── Hero: € remaining + month + days/runway ──
-    let remaining: i32 = b.cap as i32 - b.spent as i32;
-    let hero = if remaining >= 0 {
-        format!("€{remaining}")
-    } else {
-        format!("-€{}", -remaining)
-    };
-    let hero_color = if remaining >= 0 { C::Black } else { C::Red };
-    draw_text(c, &f_huge_bold(), &hero, panel.x + pad_x, content_y + 22, hero_color, Align::Left);
-    // "LEFT" suffix to the right of the hero number.
-    let hero_w = text_width(&f_huge_bold(), &hero) as i32;
-    let suffix = if remaining >= 0 { "LEFT" } else { "OVER" };
-    draw_text(c, &f_small_bold(), suffix, panel.x + pad_x + hero_w + 6, content_y + 22, hero_color, Align::Left);
-    // Right-aligned month label on the same line.
-    draw_text(c, &f_small(), &b.month_label, panel.right() - pad_x, content_y + 22, C::Black, Align::Right);
-
-    // Days remaining + average €/day to keep pace.
     let now = chrono::Local::now();
     let dim = days_in_month(now.year(), now.month());
     let day = now.day();
     let days_left = dim.saturating_sub(day) + 1; // today still counts
     let month_pct = if dim == 0 { 0.0 } else { day as f32 / dim as f32 };
-    let per_day = if days_left == 0 { 0 } else { remaining.max(0) as u32 / days_left.max(1) };
+
+    // ── Roll the envelopes up by class ──
+    //
+    // The hero number is *discretionary* money — what's actually left in the
+    // day-to-day (Variable) envelopes — not "everything budgeted minus spent",
+    // which would be dominated by an unpaid rent and savings-goal transfers and
+    // wildly overstate spendable cash. Fixed bills and savings goals each get
+    // their own one-line rollup at the bottom.
+    struct Triaged<'a> { cat: &'a BudgetCat, pace: f32 }
+    let mut overpace: Vec<Triaged> = Vec::new();
+    let mut disc_balance: i64 = 0; // net money left in discretionary envelopes
+    let mut var_cap: u32 = 0;
+    let mut var_spent: u32 = 0;
+    let mut fixed_count = 0u32;
+    let mut fixed_due: i64 = 0; // cap − spent, clamped ≥0 → upcoming debits
+    let mut savings_count = 0u32;
+    let mut savings_alloc: u32 = 0; // budgeted into goals this month
+
+    for cat in &b.cats {
+        match cat.class {
+            BudgetClass::Variable => {
+                disc_balance += cat.balance as i64;
+                var_cap += cat.cap;
+                var_spent += cat.spent;
+                if cat.cap == 0 { continue; }
+                let pace = if month_pct > 0.0 {
+                    (cat.spent as f32 / cat.cap as f32) / month_pct
+                } else { 0.0 };
+                // Flag an envelope if it's spending faster than the month is
+                // passing OR it's already in the red (negative balance).
+                if pace >= 1.2 || cat.balance < 0 {
+                    overpace.push(Triaged { cat, pace });
+                }
+            }
+            BudgetClass::Fixed => {
+                fixed_count += 1;
+                fixed_due += (cat.cap as i64 - cat.spent as i64).max(0);
+            }
+            BudgetClass::Savings => {
+                savings_count += 1;
+                savings_alloc += cat.cap;
+            }
+        }
+    }
+    // Worst first: red (overspent) envelopes float above merely-hot ones.
+    overpace.sort_by(|a, b| {
+        let a_red = a.cat.balance < 0;
+        let b_red = b.cat.balance < 0;
+        b_red.cmp(&a_red)
+            .then(b.pace.partial_cmp(&a.pace).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    // ── Hero: discretionary € left + month + days/runway ──
+    let hero = if disc_balance >= 0 {
+        format!("€{disc_balance}")
+    } else {
+        format!("-€{}", -disc_balance)
+    };
+    let hero_color = if disc_balance >= 0 { C::Black } else { C::Red };
+    draw_text(c, &f_huge_bold(), &hero, panel.x + pad_x, content_y + 22, hero_color, Align::Left);
+    let hero_w = text_width(&f_huge_bold(), &hero) as i32;
+    let suffix = if disc_balance >= 0 { "LEFT" } else { "OVER" };
+    draw_text(c, &f_small_bold(), suffix, panel.x + pad_x + hero_w + 6, content_y + 22, hero_color, Align::Left);
+    draw_text(c, &f_small(), &b.month_label, panel.right() - pad_x, content_y + 22, C::Black, Align::Right);
+
+    // Days remaining + safe-to-spend €/day over the discretionary balance.
+    let per_day = if days_left == 0 { 0 } else { disc_balance.max(0) as u32 / days_left.max(1) };
     draw_text(
         c,
         &f_small(),
-        &format!("{days_left}D LEFT · €{per_day}/D AVG"),
+        &format!("{days_left}D LEFT · €{per_day}/D SAFE"),
         panel.x + pad_x,
         content_y + 36,
         C::Black,
         Align::Left,
     );
 
-    // ── Overall progress bar ──
+    // ── Discretionary progress bar (spent vs cap of Variable envelopes) ──
+    // Color encodes pace: red over budget, yellow ahead of the calendar,
+    // green on/under pace.
     let bar = Rect::new(panel.x + pad_x, content_y + 42, (panel.w as i32 - pad_x * 2) as u32, 6);
     c.stroke_rect(bar, 1, C::Black);
-    if let Some(fill_w) = (bar.w.saturating_sub(2) * b.spent.min(b.cap)).checked_div(b.cap) {
-        c.fill_rect(Rect::new(bar.x + 1, bar.y + 1, fill_w, 4), C::Red);
-    }
-
-    // ── Triage: classify each variable envelope by pace ──
-    //
-    // pace = (spent/cap) / (day/days_in_month)
-    //   ≥ 1.2  → OVERPACE (spending faster than the month is passing)
-    //   < 1.2  → ON TRACK
-    // Fixed envelopes (autodetected via ≤ 2 transactions/month in the
-    // fetcher) skip the pace check entirely — they're paid in lumps and
-    // would always read as "overpace" otherwise.
-    struct Triaged<'a> { cat: &'a BudgetCat, pace: f32 }
-    let mut overpace: Vec<Triaged> = Vec::new();
-    let mut on_track_count = 0u32;
-    let mut on_track_left: i64 = 0;
-    let mut fixed_count = 0u32;
-    let mut fixed_remaining: i64 = 0;
-    for cat in &b.cats {
-        if cat.cap == 0 { continue; }
-        let cat_left = cat.cap as i64 - cat.spent as i64;
-        if cat.is_fixed {
-            fixed_count += 1;
-            fixed_remaining += cat_left.max(0);
-            continue;
-        }
-        let pace = if month_pct > 0.0 {
-            (cat.spent as f32 / cat.cap as f32) / month_pct
-        } else { 0.0 };
-        if pace >= 1.2 {
-            overpace.push(Triaged { cat, pace });
+    if var_cap > 0 {
+        let ratio = var_spent as f32 / var_cap as f32;
+        let fill_color = if var_spent > var_cap {
+            C::Red
+        } else if ratio > month_pct {
+            C::Yellow
         } else {
-            on_track_count += 1;
-            on_track_left += cat_left.max(0);
+            C::Green
+        };
+        if let Some(fill_w) = (bar.w.saturating_sub(2) * var_spent.min(var_cap)).checked_div(var_cap) {
+            c.fill_rect(Rect::new(bar.x + 1, bar.y + 1, fill_w, 4), fill_color);
         }
     }
-    overpace.sort_by(|a, b| b.pace.partial_cmp(&a.pace).unwrap_or(std::cmp::Ordering::Equal));
 
     // ── OVERPACE list (rendered in available space) ──
     let row_h = 12i32;
@@ -913,36 +940,39 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
                 c,
                 &f_small_bold(),
                 &format!("{:.1}x", t.pace),
-                panel.x + pad_x + 78,
+                panel.x + pad_x + 92,
                 y + 9,
                 C::Red,
                 Align::Left,
             );
-            // "€30/100" — remaining/cap, right-aligned
-            let cat_left = (t.cat.cap as i64 - t.cat.spent as i64).max(0);
-            draw_text(
-                c,
-                &f_small(),
-                &format!("€{cat_left}/{}", t.cat.cap),
-                panel.right() - pad_x,
-                y + 9,
-                C::Black,
-                Align::Right,
-            );
+            // Envelope balance, right-aligned. Negative (overspent) shows in
+            // red — the truest "this one's in trouble" signal.
+            let bal = t.cat.balance;
+            let (txt, col) = if bal < 0 {
+                (format!("-€{}", -bal), C::Red)
+            } else {
+                (format!("€{bal}"), C::Black)
+            };
+            draw_text(c, &f_small(), &txt, panel.right() - pad_x, y + 9, col, Align::Right);
         }
     } else {
         draw_text(c, &f_small_bold(), "ALL ON PACE", panel.x + pad_x, header_y + 9, C::Green, Align::Left);
     }
 
-    // ── Two summary lines pinned to bottom ──
-    let s1 = format!("ON TRACK ({on_track_count}): €{on_track_left} LEFT");
-    let s2 = if fixed_remaining == 0 {
-        format!("FIXED    ({fixed_count}): PAID")
+    // ── Two summary lines pinned to bottom: upcoming fixed debits + savings ──
+    let s1 = if fixed_due == 0 {
+        format!("FIXED   ({fixed_count}): PAID")
     } else {
-        format!("FIXED    ({fixed_count}): €{fixed_remaining} PENDING")
+        format!("FIXED   ({fixed_count}): €{fixed_due} DUE")
     };
-    draw_text(c, &f_small(), &s1, panel.x + pad_x, summary_top + 9,             C::Black, Align::Left);
-    draw_text(c, &f_small(), &s2, panel.x + pad_x, summary_top + 9 + row_h,     C::Black, Align::Left);
+    let s2 = if savings_count > 0 {
+        format!("SAVINGS ({savings_count}): €{savings_alloc} SET")
+    } else {
+        // No savings group configured — recap discretionary instead.
+        format!("DISCR.  : €{} OF €{var_cap} USED", var_spent.min(var_cap))
+    };
+    draw_text(c, &f_small(), &s1, panel.x + pad_x, summary_top + 9,         C::Black, Align::Left);
+    draw_text(c, &f_small(), &s2, panel.x + pad_x, summary_top + 9 + row_h, C::Black, Align::Left);
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {

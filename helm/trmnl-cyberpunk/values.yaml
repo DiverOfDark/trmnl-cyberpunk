@@ -99,6 +99,18 @@ alertmanagerUrl: ""
 # ActualBudget HTTP API for budget data.
 actualbudgetUrl: ""
 
+# Budget-panel envelope classification. The panel sorts each Actual category
+# into fixed bills, day-to-day variable spend, or savings goals by matching
+# these comma-separated keywords (case-insensitive substrings) against the
+# category *group* name. Leave blank to use the built-in defaults
+# (fixed: bill,contract,fixed,subscription,recurring ·
+#  variable: frequent,variable,everyday,spending,discretionary ·
+#  savings: goal,saving,sinking,fund,investment). Unmatched groups fall back to
+# a per-category transaction-count heuristic.
+actualbudgetFixedGroups: ""
+actualbudgetVariableGroups: ""
+actualbudgetSavingsGroups: ""
+
 # Open-Meteo weather location (no API key required).
 weatherLat: "52.50"
 weatherLon: "13.33"

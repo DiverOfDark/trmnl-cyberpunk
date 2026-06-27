@@ -30,6 +30,41 @@ fn is_not_configured(e: &anyhow::Error) -> bool {
     e.downcast_ref::<NotConfigured>().is_some()
 }
 
+/// Read a comma/whitespace-separated env var into a lowercased keyword list,
+/// falling back to `default` (same syntax) when unset or empty.
+fn csv_env(var: &str, default: &str) -> Vec<String> {
+    let raw = std::env::var(var).unwrap_or_default();
+    let raw = if raw.trim().is_empty() { default.to_string() } else { raw };
+    raw.split([',', ';'])
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Classify an Actual category group by matching its (lowercased) name against
+/// the configured keyword lists. Savings is checked first so a "Savings Goals"
+/// group doesn't get swallowed by a stray "goal"→fixed overlap; returns `None`
+/// when nothing matches so the caller can fall back to the transaction-count
+/// heuristic for that envelope.
+fn classify_group(
+    group_name: &str,
+    fixed: &[String],
+    variable: &[String],
+    savings: &[String],
+) -> Option<BudgetClass> {
+    let name = group_name.to_lowercase();
+    let hit = |kws: &[String]| kws.iter().any(|kw| name.contains(kw.as_str()));
+    if hit(savings) {
+        Some(BudgetClass::Savings)
+    } else if hit(fixed) {
+        Some(BudgetClass::Fixed)
+    } else if hit(variable) {
+        Some(BudgetClass::Variable)
+    } else {
+        None
+    }
+}
+
 /// Keep the last good budget around when the Actual stack flakes. We prefer
 /// cached real data over the built-in mock so the panel stays stable instead
 /// of flickering back to placeholder numbers during transient outages.
@@ -48,6 +83,14 @@ pub struct Sources {
     pub actualbudget_key: String,
     pub actualbudget_sync_id: String,
     pub actualbudget_password: String,
+    /// Lowercased substrings matched against the Actual category *group* name
+    /// to classify its envelopes. Group-based classification respects the
+    /// structure the user already curated and is far more accurate than the
+    /// per-category transaction-count heuristic (which is the fallback when no
+    /// keyword matches). See `classify_group`.
+    pub budget_fixed_groups: Vec<String>,
+    pub budget_variable_groups: Vec<String>,
+    pub budget_savings_groups: Vec<String>,
     pub ics_urls: Vec<String>,
     pub weather_lat: f64,
     pub weather_lon: f64,
@@ -80,6 +123,22 @@ impl Sources {
             actualbudget_key: std::env::var("ACTUALBUDGET_KEY").unwrap_or_default(),
             actualbudget_sync_id: std::env::var("ACTUALBUDGET_SYNC_ID").unwrap_or_default(),
             actualbudget_password: std::env::var("ACTUALBUDGET_PASSWORD").unwrap_or_default(),
+            // Group-name keywords for envelope classification. Defaults cover
+            // common English / Actual-template group names; override per budget
+            // via env (comma-separated, matched case-insensitively as
+            // substrings of the group name).
+            budget_fixed_groups: csv_env(
+                "ACTUALBUDGET_FIXED_GROUPS",
+                "bill,contract,fixed,subscription,recurring",
+            ),
+            budget_variable_groups: csv_env(
+                "ACTUALBUDGET_VARIABLE_GROUPS",
+                "frequent,variable,everyday,spending,discretionary",
+            ),
+            budget_savings_groups: csv_env(
+                "ACTUALBUDGET_SAVINGS_GROUPS",
+                "goal,saving,sinking,fund,investment",
+            ),
             ics_urls: std::env::var("ICS_URLS")
                 .unwrap_or_default()
                 .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
@@ -865,27 +924,46 @@ impl Sources {
         let mut total_spent: u32 = 0;
         let mut total_cap: u32 = 0;
 
-        // Flatten all category groups → categories
+        // Flatten all category groups → categories. Skip the income group
+        // entirely — its "spent" is positive inflow and would pollute the
+        // spend rollups.
         for group in &cats_raw {
+            if group["is_income"].as_bool().unwrap_or(false) {
+                continue;
+            }
+            let group_name = group["name"].as_str().unwrap_or("");
+            // Group-based class, with the transaction-count heuristic as a
+            // per-envelope fallback when the group name is unrecognized.
+            let group_class = classify_group(
+                group_name,
+                &self.budget_fixed_groups,
+                &self.budget_variable_groups,
+                &self.budget_savings_groups,
+            );
             if let Some(cat_list) = group["categories"].as_array() {
                 for cat in cat_list {
                     let id = cat["id"].as_str().unwrap_or("");
                     let name = cat["name"].as_str().unwrap_or("?");
                     let spent = (cat["spent"].as_f64().unwrap_or(0.0).abs() / 100.0).round() as u32;
                     let cap = (cat["budgeted"].as_f64().unwrap_or(0.0) / 100.0).round() as u32;
+                    let balance = (cat["balance"].as_f64().unwrap_or(0.0) / 100.0).round() as i32;
                     if cap > 0 || spent > 0 {
                         total_spent += spent;
                         total_cap += cap;
                         let count = tx_counts.get(id).copied().unwrap_or(0);
+                        // Fallback: ≤ 2 transactions/month reads as a fixed
+                        // lump; more than that is day-to-day variable spend.
+                        let class = group_class.unwrap_or(if count <= 2 {
+                            BudgetClass::Fixed
+                        } else {
+                            BudgetClass::Variable
+                        });
                         cats.push(BudgetCat {
                             label: name.to_string(),
                             spent,
                             cap,
-                            // ≤ 2 transactions in the month is the heuristic
-                            // for "fixed cost". Empty (count == 0) is also
-                            // treated as fixed — a no-spend month for an
-                            // envelope shouldn't read as overpace.
-                            is_fixed: count <= 2,
+                            balance,
+                            class,
                         });
                     }
                 }

@@ -13,6 +13,15 @@ data:
   PROMETHEUS_URL: {{ .Values.prometheusUrl | default "" | quote }}
   ALERTMANAGER_URL: {{ .Values.alertmanagerUrl | default "" | quote }}
   ACTUALBUDGET_URL: {{ .Values.actualbudgetUrl | default "" | quote }}
+  {{- if .Values.actualbudgetFixedGroups }}
+  ACTUALBUDGET_FIXED_GROUPS: {{ .Values.actualbudgetFixedGroups | quote }}
+  {{- end }}
+  {{- if .Values.actualbudgetVariableGroups }}
+  ACTUALBUDGET_VARIABLE_GROUPS: {{ .Values.actualbudgetVariableGroups | quote }}
+  {{- end }}
+  {{- if .Values.actualbudgetSavingsGroups }}
+  ACTUALBUDGET_SAVINGS_GROUPS: {{ .Values.actualbudgetSavingsGroups | quote }}
+  {{- end }}
   WEATHER_LAT: {{ .Values.weatherLat | default "52.50" | quote }}
   WEATHER_LON: {{ .Values.weatherLon | default "13.33" | quote }}
   WEATHER_TZ: {{ .Values.weatherTz | default "Europe/Berlin" | quote }}

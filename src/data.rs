@@ -70,19 +70,37 @@ pub struct AgendaItem {
     pub duration: String,
 }
 
+/// How an envelope behaves, derived from the Actual category *group* the user
+/// already curated (with a transaction-count fallback when the group name is
+/// unrecognized). Drives the budget panel's triage:
+///
+/// - `Fixed` — rent, insurances, subscriptions. Paid in lumps; skip the pace check (they'd always read as overpace) and report as upcoming debits instead.
+/// - `Variable` — day-to-day discretionary spend. Pace-checked, and drives the hero "discretionary left" figure.
+/// - `Savings` — goals / sinking funds. Excluded from "spendable" money and reported separately.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum BudgetClass {
+    Fixed,
+    Variable,
+    Savings,
+}
+
 #[derive(Clone, Serialize)]
 pub struct BudgetCat {
     /// Full category name (no truncation). The renderer truncates for
-    /// display; keeping the full name here lets clients (and future logic
-    /// like fixed-category detection) match without ambiguity.
+    /// display; keeping the full name here lets clients match without
+    /// ambiguity.
     pub label: String,
     pub spent: u32,
     pub cap: u32,
-    /// `true` if this envelope behaves like a fixed cost (rent, subscription) —
-    /// detected as ≤2 transactions in the current month. Fixed envelopes
-    /// don't trigger overpace alerts when they hit 100% early in the month.
+    /// Envelope balance straight from Actual (carryover + budgeted − spent).
+    /// Negative means the envelope is overspent / in the red — the truest
+    /// signal of trouble in a YNAB-style budget, since it includes money
+    /// carried over from prior months that month-only `cap − spent` misses.
     #[serde(default)]
-    pub is_fixed: bool,
+    pub balance: i32,
+    /// Envelope behavior class, derived from the Actual category group.
+    pub class: BudgetClass,
 }
 
 #[derive(Clone, Serialize)]
@@ -261,16 +279,17 @@ impl DashData {
                 spent: 1842,
                 cap: 2600,
                 cats: vec![
-                    // Mock mix: a fixed envelope (rent paid in full),
-                    // an overpace one (food at 1.5× pace assuming mid-month),
-                    // and some on-track ones — exercises every branch.
-                    BudgetCat { label: "Rent".into(),       spent: 980, cap: 980, is_fixed: true  },
-                    BudgetCat { label: "Internet".into(),    spent: 50,  cap: 50,  is_fixed: true  },
-                    BudgetCat { label: "Food".into(),        spent: 412, cap: 500, is_fixed: false },
-                    BudgetCat { label: "Shisha".into(),      spent: 180, cap: 200, is_fixed: false },
-                    BudgetCat { label: "Infrastructure".into(), spent: 80, cap: 250, is_fixed: false },
-                    BudgetCat { label: "Transit".into(),     spent:  94, cap: 200, is_fixed: false },
-                    BudgetCat { label: "Misc".into(),        spent:  46, cap: 420, is_fixed: false },
+                    // Mock mix exercises every branch: fixed bills (some still
+                    // pending), variable envelopes both over- and under-pace
+                    // (one with a negative balance), and a savings goal.
+                    BudgetCat { label: "Rent".into(),        spent: 980, cap: 980, balance:   0, class: BudgetClass::Fixed    },
+                    BudgetCat { label: "Internet".into(),    spent:   0, cap:  50, balance:  50, class: BudgetClass::Fixed    },
+                    BudgetCat { label: "Insurance".into(),   spent:  60, cap:  60, balance:  40, class: BudgetClass::Fixed    },
+                    BudgetCat { label: "Food".into(),        spent: 512, cap: 500, balance: -12, class: BudgetClass::Variable },
+                    BudgetCat { label: "Shisha".into(),      spent: 180, cap: 200, balance:  60, class: BudgetClass::Variable },
+                    BudgetCat { label: "Transit".into(),     spent:  94, cap: 200, balance: 106, class: BudgetClass::Variable },
+                    BudgetCat { label: "Misc".into(),        spent:  46, cap: 420, balance: 374, class: BudgetClass::Variable },
+                    BudgetCat { label: "Vacation".into(),    spent:   0, cap: 300, balance: 1800, class: BudgetClass::Savings },
                 ],
             }),
             alerts: vec![
