@@ -963,6 +963,7 @@ impl Sources {
                             spent,
                             cap,
                             balance,
+                            txns: count,
                             class,
                         });
                     }

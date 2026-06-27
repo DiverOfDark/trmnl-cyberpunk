@@ -75,7 +75,7 @@ pub struct AgendaItem {
 /// unrecognized). Drives the budget panel's triage:
 ///
 /// - `Fixed` — rent, insurances, subscriptions. Paid in lumps; reported as upcoming debits rather than flagged for overspend.
-/// - `Variable` — day-to-day discretionary spend. Drives the hero "discretionary left" figure and is flagged when its `balance` goes negative (overspent, carryover included).
+/// - `Variable` — day-to-day discretionary spend. Drives the hero "discretionary left" figure; flagged OVER when its `balance` is negative, or AT RISK when a frequent envelope's burn rate projects the balance negative before month-end (carryover included, so a category cushioned by accumulated funds isn't falsely flagged).
 /// - `Savings` — goals / sinking funds. Excluded from "spendable" money and reported separately.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -99,6 +99,12 @@ pub struct BudgetCat {
     /// carried over from prior months that month-only `cap − spent` misses.
     #[serde(default)]
     pub balance: i32,
+    /// Number of transactions in the category this month. Used to tell a
+    /// frequent day-to-day envelope (where a "burn rate" is meaningful and the
+    /// panel can project whether it's heading into the red) from a lumpy
+    /// once-a-month one (where projecting a daily rate is nonsense).
+    #[serde(default)]
+    pub txns: u32,
     /// Envelope behavior class, derived from the Actual category group.
     pub class: BudgetClass,
 }
@@ -280,16 +286,19 @@ impl DashData {
                 cap: 2600,
                 cats: vec![
                     // Mock mix exercises every branch: fixed bills (some still
-                    // pending), variable envelopes both over- and under-pace
-                    // (one with a negative balance), and a savings goal.
-                    BudgetCat { label: "Rent".into(),        spent: 980, cap: 980, balance:   0, class: BudgetClass::Fixed    },
-                    BudgetCat { label: "Internet".into(),    spent:   0, cap:  50, balance:  50, class: BudgetClass::Fixed    },
-                    BudgetCat { label: "Insurance".into(),   spent:  60, cap:  60, balance:  40, class: BudgetClass::Fixed    },
-                    BudgetCat { label: "Food".into(),        spent: 512, cap: 500, balance: -12, class: BudgetClass::Variable },
-                    BudgetCat { label: "Shisha".into(),      spent: 180, cap: 200, balance:  60, class: BudgetClass::Variable },
-                    BudgetCat { label: "Transit".into(),     spent:  94, cap: 200, balance: 106, class: BudgetClass::Variable },
-                    BudgetCat { label: "Misc".into(),        spent:  46, cap: 420, balance: 374, class: BudgetClass::Variable },
-                    BudgetCat { label: "Vacation".into(),    spent:   0, cap: 300, balance: 1800, class: BudgetClass::Savings },
+                    // pending), a variable envelope already in the red (OVER), a
+                    // frequent one burning toward negative (AT RISK), a lumpy
+                    // one that's thin but shouldn't be projected (gated out),
+                    // healthy ones, and a savings goal.
+                    BudgetCat { label: "Rent".into(),        spent: 980, cap: 980, balance:    0, txns:  1, class: BudgetClass::Fixed    },
+                    BudgetCat { label: "Internet".into(),    spent:   0, cap:  50, balance:   50, txns:  0, class: BudgetClass::Fixed    },
+                    BudgetCat { label: "Insurance".into(),   spent:  60, cap:  60, balance:   40, txns:  1, class: BudgetClass::Fixed    },
+                    BudgetCat { label: "Food".into(),        spent: 512, cap: 500, balance:  -12, txns: 40, class: BudgetClass::Variable },
+                    BudgetCat { label: "Hookah".into(),      spent: 600, cap: 800, balance:   30, txns: 14, class: BudgetClass::Variable },
+                    BudgetCat { label: "Cleaning".into(),    spent: 130, cap: 130, balance:    5, txns:  1, class: BudgetClass::Variable },
+                    BudgetCat { label: "Transit".into(),     spent:  94, cap: 200, balance:  106, txns:  8, class: BudgetClass::Variable },
+                    BudgetCat { label: "Misc".into(),        spent:  46, cap: 420, balance:  374, txns:  3, class: BudgetClass::Variable },
+                    BudgetCat { label: "Vacation".into(),    spent:   0, cap: 300, balance: 1800, txns:  0, class: BudgetClass::Savings },
                 ],
             }),
             alerts: vec![

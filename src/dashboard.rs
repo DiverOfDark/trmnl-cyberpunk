@@ -824,7 +824,10 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
     // which would be dominated by an unpaid rent and savings-goal transfers and
     // wildly overstate spendable cash. Fixed bills and savings goals each get
     // their own one-line rollup at the bottom.
-    let mut overspent: Vec<&BudgetCat> = Vec::new();
+    // A flagged variable envelope: `over` when already in the red, otherwise
+    // AT RISK with `proj` = projected end-of-month balance at the current rate.
+    struct Flag<'a> { cat: &'a BudgetCat, over: bool, proj: i64 }
+    let mut flags: Vec<Flag> = Vec::new();
     let mut disc_balance: i64 = 0; // net money left in discretionary envelopes
     let mut var_cap: u32 = 0;
     let mut var_spent: u32 = 0;
@@ -833,19 +836,31 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
     let mut savings_count = 0u32;
     let mut savings_alloc: u32 = 0; // budgeted into goals this month
 
+    let elapsed = day.max(1); // days into the month, today included
+    let remaining = dim.saturating_sub(day); // whole days still to come
+
     for cat in &b.cats {
         match cat.class {
             BudgetClass::Variable => {
                 disc_balance += cat.balance as i64;
                 var_cap += cat.cap;
                 var_spent += cat.spent;
-                // Flag only envelopes that are actually in the red. `balance`
-                // already folds in carryover (carryover + budgeted − spent),
-                // so a category that overspent *this month's* allocation but is
-                // still covered by accumulated funds reads as fine — which is
-                // correct. A within-month "pace" ratio would falsely flag it.
+                // `balance` already folds in carryover (carryover + budgeted −
+                // spent), so it's the truth for "is this envelope healthy".
                 if cat.balance < 0 {
-                    overspent.push(cat);
+                    // Already overspent — hard flag regardless of pace.
+                    flags.push(Flag { cat, over: true, proj: cat.balance as i64 });
+                } else if cat.txns >= 3 {
+                    // Frequent day-to-day envelope: project the balance to
+                    // month-end at the current burn rate and warn *before* it
+                    // goes negative. Gated on txns ≥ 3 so a lumpy once-a-month
+                    // payment (whose "daily rate" is meaningless) isn't flagged
+                    // just for being thin late in the month.
+                    let daily = cat.spent as f32 / elapsed as f32;
+                    let proj = cat.balance as f32 - daily * remaining as f32;
+                    if proj < 0.0 {
+                        flags.push(Flag { cat, over: false, proj: proj.round() as i64 });
+                    }
                 }
             }
             BudgetClass::Fixed => {
@@ -858,8 +873,10 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
             }
         }
     }
-    // Deepest in the red first.
-    overspent.sort_by_key(|c| c.balance);
+    // Already-overspent first, then deepest projected shortfall.
+    flags.sort_by(|a, b| {
+        b.over.cmp(&a.over).then(a.proj.cmp(&b.proj))
+    });
 
     // ── Hero: discretionary € left + month + days/runway ──
     let hero = if disc_balance >= 0 {
@@ -905,43 +922,55 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
         }
     }
 
-    // ── OVERSPENT list (rendered in available space) ──
+    // ── Flagged-envelope list (rendered in available space) ──
+    //
+    // OVER rows (already negative balance) show the current shortfall in red;
+    // AT RISK rows (projected to end the month negative at the current burn
+    // rate) show that projection with a "→" in yellow — the advance warning.
     let row_h = 12i32;
     let header_y = content_y + 58;
     // Reserve last 26 px for the two summary lines.
     let summary_top = panel.bottom() - 4 - row_h * 2;
     let list_top = header_y + row_h;
-    let max_rows = (((summary_top - list_top) / row_h).max(0) as usize).min(overspent.len());
+    let max_rows = (((summary_top - list_top) / row_h).max(0) as usize).min(flags.len());
 
-    if !overspent.is_empty() {
+    if !flags.is_empty() {
+        // Header adapts to the mix: all-overspent → "OVERSPENT" (red),
+        // all-projected → "AT RISK" (blue), both → "OVER/RISK" (red). Yellow
+        // is unreadable as text on the light panel, so red/blue carry severity.
+        let over_n = flags.iter().filter(|f| f.over).count();
+        let risk_n = flags.len() - over_n;
+        let (title, header_color) = match (over_n, risk_n) {
+            (_, 0) => ("OVERSPENT", C::Red),
+            (0, _) => ("AT RISK", C::Blue),
+            _ => ("OVER/RISK", C::Red),
+        };
         draw_text(
             c,
             &f_small_bold(),
-            &format!("OVERSPENT ({})", overspent.len()),
+            &format!("{title} ({})", flags.len()),
             panel.x + pad_x,
             header_y + 9,
-            C::Red,
+            header_color,
             Align::Left,
         );
-        for (i, cat) in overspent.iter().take(max_rows).enumerate() {
+        for (i, f) in flags.iter().take(max_rows).enumerate() {
             let y = list_top + i as i32 * row_h;
-            // No pace column now, so the label gets the full width up to the
-            // right-aligned shortfall.
-            let label = clip_to_chars(&cat.label, 16);
+            let label = clip_to_chars(&f.cat.label, 14);
             draw_text(c, &f_small(), &label, panel.x + pad_x, y + 9, C::Black, Align::Left);
-            // How deep in the red — the amount you'd need to cover, in red.
-            draw_text(
-                c,
-                &f_small_bold(),
-                &format!("-€{}", -cat.balance),
-                panel.right() - pad_x,
-                y + 9,
-                C::Red,
-                Align::Right,
-            );
+            // OVER: current shortfall in red. AT RISK: projected end balance,
+            // prefixed ">" ("trending to"), in blue. ASCII only — the u8g2
+            // Latin fonts have no "→" glyph, and yellow text is unreadable on
+            // the light panel, so red/blue + ">" carry the two states.
+            let (txt, col) = if f.over {
+                (format!("-€{}", -f.proj), C::Red)
+            } else {
+                (format!(">-€{}", -f.proj), C::Blue)
+            };
+            draw_text(c, &f_small_bold(), &txt, panel.right() - pad_x, y + 9, col, Align::Right);
         }
     } else {
-        draw_text(c, &f_small_bold(), "ALL FUNDED", panel.x + pad_x, header_y + 9, C::Green, Align::Left);
+        draw_text(c, &f_small_bold(), "ALL ON TRACK", panel.x + pad_x, header_y + 9, C::Green, Align::Left);
     }
 
     // ── Two summary lines pinned to bottom: upcoming fixed debits + savings ──
