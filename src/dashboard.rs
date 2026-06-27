@@ -824,8 +824,7 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
     // which would be dominated by an unpaid rent and savings-goal transfers and
     // wildly overstate spendable cash. Fixed bills and savings goals each get
     // their own one-line rollup at the bottom.
-    struct Triaged<'a> { cat: &'a BudgetCat, pace: f32 }
-    let mut overpace: Vec<Triaged> = Vec::new();
+    let mut overspent: Vec<&BudgetCat> = Vec::new();
     let mut disc_balance: i64 = 0; // net money left in discretionary envelopes
     let mut var_cap: u32 = 0;
     let mut var_spent: u32 = 0;
@@ -840,14 +839,13 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
                 disc_balance += cat.balance as i64;
                 var_cap += cat.cap;
                 var_spent += cat.spent;
-                if cat.cap == 0 { continue; }
-                let pace = if month_pct > 0.0 {
-                    (cat.spent as f32 / cat.cap as f32) / month_pct
-                } else { 0.0 };
-                // Flag an envelope if it's spending faster than the month is
-                // passing OR it's already in the red (negative balance).
-                if pace >= 1.2 || cat.balance < 0 {
-                    overpace.push(Triaged { cat, pace });
+                // Flag only envelopes that are actually in the red. `balance`
+                // already folds in carryover (carryover + budgeted − spent),
+                // so a category that overspent *this month's* allocation but is
+                // still covered by accumulated funds reads as fine — which is
+                // correct. A within-month "pace" ratio would falsely flag it.
+                if cat.balance < 0 {
+                    overspent.push(cat);
                 }
             }
             BudgetClass::Fixed => {
@@ -860,13 +858,8 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
             }
         }
     }
-    // Worst first: red (overspent) envelopes float above merely-hot ones.
-    overpace.sort_by(|a, b| {
-        let a_red = a.cat.balance < 0;
-        let b_red = b.cat.balance < 0;
-        b_red.cmp(&a_red)
-            .then(b.pace.partial_cmp(&a.pace).unwrap_or(std::cmp::Ordering::Equal))
-    });
+    // Deepest in the red first.
+    overspent.sort_by_key(|c| c.balance);
 
     // ── Hero: discretionary € left + month + days/runway ──
     let hero = if disc_balance >= 0 {
@@ -912,51 +905,43 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
         }
     }
 
-    // ── OVERPACE list (rendered in available space) ──
+    // ── OVERSPENT list (rendered in available space) ──
     let row_h = 12i32;
     let header_y = content_y + 58;
     // Reserve last 26 px for the two summary lines.
     let summary_top = panel.bottom() - 4 - row_h * 2;
     let list_top = header_y + row_h;
-    let max_overpace = (((summary_top - list_top) / row_h).max(0) as usize).min(overpace.len());
+    let max_rows = (((summary_top - list_top) / row_h).max(0) as usize).min(overspent.len());
 
-    if !overpace.is_empty() {
+    if !overspent.is_empty() {
         draw_text(
             c,
             &f_small_bold(),
-            &format!("OVERPACE ({})", overpace.len()),
+            &format!("OVERSPENT ({})", overspent.len()),
             panel.x + pad_x,
             header_y + 9,
             C::Red,
             Align::Left,
         );
-        for (i, t) in overpace.iter().take(max_overpace).enumerate() {
+        for (i, cat) in overspent.iter().take(max_rows).enumerate() {
             let y = list_top + i as i32 * row_h;
-            // 12 chars in helvR08 ≈ 60 px; pace anchor pushed to +78 so the
-            // longest label still has clearance before the "1.8x" marker.
-            let label = clip_to_chars(&t.cat.label, 12);
+            // No pace column now, so the label gets the full width up to the
+            // right-aligned shortfall.
+            let label = clip_to_chars(&cat.label, 16);
             draw_text(c, &f_small(), &label, panel.x + pad_x, y + 9, C::Black, Align::Left);
+            // How deep in the red — the amount you'd need to cover, in red.
             draw_text(
                 c,
                 &f_small_bold(),
-                &format!("{:.1}x", t.pace),
-                panel.x + pad_x + 92,
+                &format!("-€{}", -cat.balance),
+                panel.right() - pad_x,
                 y + 9,
                 C::Red,
-                Align::Left,
+                Align::Right,
             );
-            // Envelope balance, right-aligned. Negative (overspent) shows in
-            // red — the truest "this one's in trouble" signal.
-            let bal = t.cat.balance;
-            let (txt, col) = if bal < 0 {
-                (format!("-€{}", -bal), C::Red)
-            } else {
-                (format!("€{bal}"), C::Black)
-            };
-            draw_text(c, &f_small(), &txt, panel.right() - pad_x, y + 9, col, Align::Right);
         }
     } else {
-        draw_text(c, &f_small_bold(), "ALL ON PACE", panel.x + pad_x, header_y + 9, C::Green, Align::Left);
+        draw_text(c, &f_small_bold(), "ALL FUNDED", panel.x + pad_x, header_y + 9, C::Green, Align::Left);
     }
 
     // ── Two summary lines pinned to bottom: upcoming fixed debits + savings ──

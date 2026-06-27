@@ -73,7 +73,7 @@ curl http://localhost:8080/refresh
 
 Upstream-specific env vars (leave blank to use the matching mock data) are documented in `docker-compose.yml`.
 
-The budget panel classifies each Actual envelope as **fixed** (bills/subscriptions — reported as upcoming debits), **variable** (day-to-day spend — pace-checked, and the source of the hero "discretionary left" figure), or **savings** (goals — reported separately). Classification matches the Actual category *group* name against `ACTUALBUDGET_FIXED_GROUPS` / `ACTUALBUDGET_VARIABLE_GROUPS` / `ACTUALBUDGET_SAVINGS_GROUPS` (comma-separated, case-insensitive substrings; sensible English defaults built in), falling back to a per-category transaction-count heuristic when a group name is unrecognized.
+The budget panel classifies each Actual envelope as **fixed** (bills/subscriptions — reported as upcoming debits), **variable** (day-to-day spend — the source of the hero "discretionary left" figure, and flagged as *overspent* when its envelope balance goes negative), or **savings** (goals — reported separately). Overspend uses Actual's `balance` (carryover + budgeted − spent), so a category that overshot this month's allocation but is still covered by accumulated funds isn't falsely flagged. Classification matches the Actual category *group* name against `ACTUALBUDGET_FIXED_GROUPS` / `ACTUALBUDGET_VARIABLE_GROUPS` / `ACTUALBUDGET_SAVINGS_GROUPS` (comma-separated, case-insensitive substrings; sensible English defaults built in), falling back to a per-category transaction-count heuristic when a group name is unrecognized.
 
 ---
 

@@ -74,8 +74,8 @@ pub struct AgendaItem {
 /// already curated (with a transaction-count fallback when the group name is
 /// unrecognized). Drives the budget panel's triage:
 ///
-/// - `Fixed` — rent, insurances, subscriptions. Paid in lumps; skip the pace check (they'd always read as overpace) and report as upcoming debits instead.
-/// - `Variable` — day-to-day discretionary spend. Pace-checked, and drives the hero "discretionary left" figure.
+/// - `Fixed` — rent, insurances, subscriptions. Paid in lumps; reported as upcoming debits rather than flagged for overspend.
+/// - `Variable` — day-to-day discretionary spend. Drives the hero "discretionary left" figure and is flagged when its `balance` goes negative (overspent, carryover included).
 /// - `Savings` — goals / sinking funds. Excluded from "spendable" money and reported separately.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Debug)]
 #[serde(rename_all = "lowercase")]
