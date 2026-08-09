@@ -278,20 +278,23 @@ pub fn days_in_month(year: i32, month: u32) -> u32 {
 }
 
 impl BudgetData {
-    /// How this month's spending compares with the last three, measured at
-    /// the same day of the month so it's like for like. `None` until there's
-    /// a usable baseline.
+    /// Euros more (positive) or less (negative) than this month usually costs
+    /// by this same day. `None` until there's a usable baseline.
+    ///
+    /// Deliberately euros rather than a percentage. "+20%" requires knowing
+    /// the baseline to mean anything, and the baseline isn't on screen — so
+    /// it reads as a number without a unit. "€531 more than usual" is the
+    /// same fact in the currency every other figure on the panel uses, and
+    /// sits naturally against the daily allowance above it.
     ///
     /// This replaced a spent-vs-budget pace bar. Budgets here are routinely
     /// set below what a category actually costs, so measuring against them
     /// mostly reported that the budget was wrong; measuring against recent
     /// behavior reports whether *this month* is different, which is the
     /// question worth a wall panel.
-    pub fn vs_normal(&self) -> Option<i32> {
+    pub fn vs_usual(&self) -> Option<i64> {
         let typical = self.typical_mtd?;
-        (typical > 0).then(|| {
-            ((self.mtd_spend as i64 - typical as i64) * 100 / typical as i64) as i32
-        })
+        (typical > 0).then(|| self.mtd_spend as i64 - typical as i64)
     }
 
     /// Cash plus holdings.
@@ -682,20 +685,21 @@ mod tests {
         }
     }
 
-    /// The whole-budget comparison the panel leads with. Real figures from
-    /// 2026-08-09: €3,186 spent by day 9 against a €2,655 three-month norm.
+    /// The whole-budget comparison the panel leads with, in euros rather than
+    /// percent. Real figures from 2026-08-09: €3,186 spent by day 9 against a
+    /// €2,655 three-month norm.
     #[test]
     fn month_compares_against_its_own_norm() {
-        assert_eq!(budget(3186, Some(2655)).vs_normal(), Some(20));
-        assert_eq!(budget(2655, Some(2655)).vs_normal(), Some(0));
-        assert_eq!(budget(1900, Some(2655)).vs_normal(), Some(-28));
+        assert_eq!(budget(3186, Some(2655)).vs_usual(), Some(531));
+        assert_eq!(budget(2655, Some(2655)).vs_usual(), Some(0));
+        assert_eq!(budget(1900, Some(2655)).vs_usual(), Some(-755));
     }
 
     /// Without a baseline the panel says nothing rather than guessing.
     #[test]
     fn no_baseline_means_no_comparison() {
-        assert_eq!(budget(3186, None).vs_normal(), None);
-        assert_eq!(budget(3186, Some(0)).vs_normal(), None);
+        assert_eq!(budget(3186, None).vs_usual(), None);
+        assert_eq!(budget(3186, Some(0)).vs_usual(), None);
     }
 
     /// Capital is cash plus holdings, which is what the trend line plots.

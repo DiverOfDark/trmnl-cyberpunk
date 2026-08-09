@@ -923,36 +923,43 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>, stale: Option<&str>) {
 
     // ── This month against the last three ──
     //
-    // Replaces a spent-vs-budget pace bar. These budgets are routinely set
-    // below what a category actually costs, so measuring against them mostly
-    // reported that the budget was wrong. Measuring against recent behavior
-    // answers the question a wall panel is for: is *this* month different?
+    // Stated in euros and words rather than as a percentage. A bare "+20%"
+    // asks the reader to reconstruct a baseline that isn't on screen; "€531
+    // more than usual" is the same fact in the unit every other figure here
+    // uses, and it sits naturally against the daily allowance above.
     let mut y = content_y + 44;
-    match b.vs_normal() {
-        Some(pct) => {
-            let txt = format!("{pct:+}%");
-            let color = if pct >= 15 {
-                C::Red
-            } else if pct <= -15 {
-                C::Green
+    match b.vs_usual() {
+        Some(delta) => {
+            // A small band reads as "the same" — €12 either way is rounding,
+            // not a trend, and naming it invites false precision.
+            let (amount, word, color) = if delta.abs() <= 25 {
+                (String::new(), "ON USUAL PACE", C::Black)
+            } else if delta > 0 {
+                (format!("€{delta}"), "MORE THAN USUAL", C::Red)
             } else {
-                C::Black
+                (format!("€{}", -delta), "LESS THAN USUAL", C::Green)
             };
-            draw_text(c, &f_xl_bold(), &txt, left, y + 14, color, Align::Left);
-            draw_text(c, &f_small(), "VS NORMAL 3MO", right, y + 14, C::Black, Align::Right);
-
-            // The bar plots the *ratio*: normal sits at a fixed mark and the
-            // fill runs past it. Plotting absolutes would put both near the
-            // left edge early in the month with a few pixels between them.
-            let bar = Rect::new(left, y + 19, inner_w, 7);
-            c.stroke_rect(bar, 1, C::Black);
-            let track = bar.w.saturating_sub(2);
-            let mark = track * 55 / 100;
-            let fill = ((mark as i64 * (100 + pct as i64) / 100).max(0) as u32).min(track);
-            c.fill_rect(Rect::new(bar.x + 1, bar.y + 1, fill, 5), color);
-            // Normal marker drawn last so the fill never hides it.
-            c.vline(bar.x + 1 + mark as i32, bar.y - 2, 11, C::Black);
-            y += 34;
+            if amount.is_empty() {
+                draw_text(c, &f_lg_bold(), word, left, y + 14, color, Align::Left);
+            } else {
+                draw_text(c, &f_xl_bold(), &amount, left, y + 14, color, Align::Left);
+                let w = text_width(&f_xl_bold(), &amount) as i32;
+                draw_text(c, &f_small(), word, left + w + 6, y + 14, color, Align::Left);
+            }
+            // The two figures behind the claim, so it can be checked rather
+            // than taken on faith.
+            if let Some(typical) = b.typical_mtd {
+                draw_text(
+                    c,
+                    &f_small(),
+                    &format!("€{} BY D{} · USUAL €{}", b.mtd_spend, day, typical),
+                    left,
+                    y + 27,
+                    C::Black,
+                    Align::Left,
+                );
+            }
+            y += 33;
         }
         None => {
             draw_text(c, &f_small(), "NO BASELINE YET", left, y + 10, C::Black, Align::Left);
@@ -983,10 +990,9 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>, stale: Option<&str>) {
 
     // ── Flagged envelopes: at most two, so the panel stays scannable ──
     let row_h = 13i32;
-    let footer_y = panel.bottom() - 8;
     // Three rows maximum: past that the list stops being a signal and starts
     // being a wall, which is what the old projection-based panel produced.
-    let max_rows = (((footer_y - row_h - y) / row_h).max(0) as usize).min(3);
+    let max_rows = ((((panel.bottom() - 6) - y) / row_h).max(0) as usize).min(3);
     if flags.is_empty() {
         draw_text(c, &f_small_bold(), "ALL ON TRACK", left, y + 9, C::Green, Align::Left);
     }
@@ -1006,24 +1012,10 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>, stale: Option<&str>) {
         y += row_h;
     }
 
-    // ── Footer: how much of the capital is spendable cash ──
-    // A slow-moving fact, but the one number the capital line hides: all of
-    // last year's growth went into holdings while cash stayed flat.
-    if b.capital_total() != 0 {
-        draw_text(
-            c,
-            &f_small(),
-            &format!("CASH {} OF {}", short_eur(b.cash), short_eur(b.capital_total())),
-            left,
-            footer_y,
-            C::Black,
-            Align::Left,
-        );
-    }
 }
 
 /// Height of the capital chart's plot area.
-const CAPITAL_H: i32 = 26;
+const CAPITAL_H: i32 = 32;
 
 /// Total capital over ~12 month-ends, as a line on a truncated axis.
 ///
