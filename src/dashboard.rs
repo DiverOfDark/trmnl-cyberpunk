@@ -913,64 +913,39 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>, stale: Option<&str>) {
     draw_text(c, &f_huge_bold(), &hero, left, content_y + 22, hero_color, Align::Left);
     let hero_w = text_width(&f_huge_bold(), &hero) as i32;
     draw_text(c, &f_small_bold(), "/DAY", left + hero_w + 4, content_y + 22, hero_color, Align::Left);
-    draw_text(c, &f_small(), &b.month_label, right, content_y + 22, C::Black, Align::Right);
 
+    // The month-vs-usual comparison, reduced to a verdict. The euro figure
+    // and the two numbers behind it were accurate but cost three of the
+    // panel's eight lines; direction is what a glance actually uses, and the
+    // envelope rows below say where it's coming from. "USUAL" stays in every
+    // variant because "OVER" alone doesn't say over *what*.
+    if let Some(delta) = b.vs_usual() {
+        let (word, color) = if delta.abs() <= 25 {
+            ("ON USUAL", C::Black)
+        } else if delta > 0 {
+            ("OVER USUAL", C::Red)
+        } else {
+            ("UNDER USUAL", C::Green)
+        };
+        draw_text(c, &f_small_bold(), word, right, content_y + 22, color, Align::Right);
+    }
+
+    // The month label is deliberately absent: the dashboard header already
+    // carries the full date two panels over.
     let sub = match b.days_to_payday {
-        0 => "SAFE · PAYDAY TODAY".to_string(),
-        d => format!("SAFE · {d}D TO PAYDAY"),
+        0 => "PAYDAY TODAY".to_string(),
+        d => format!("{d}D TO PAYDAY"),
     };
     draw_text(c, &f_small(), &sub, left, content_y + 36, C::Black, Align::Left);
 
-    // ── This month against the last three ──
-    //
-    // Stated in euros and words rather than as a percentage. A bare "+20%"
-    // asks the reader to reconstruct a baseline that isn't on screen; "€531
-    // more than usual" is the same fact in the unit every other figure here
-    // uses, and it sits naturally against the daily allowance above.
-    let mut y = content_y + 44;
-    match b.vs_usual() {
-        Some(delta) => {
-            // A small band reads as "the same" — €12 either way is rounding,
-            // not a trend, and naming it invites false precision.
-            let (amount, word, color) = if delta.abs() <= 25 {
-                (String::new(), "ON USUAL PACE", C::Black)
-            } else if delta > 0 {
-                (format!("€{delta}"), "MORE THAN USUAL", C::Red)
-            } else {
-                (format!("€{}", -delta), "LESS THAN USUAL", C::Green)
-            };
-            if amount.is_empty() {
-                draw_text(c, &f_lg_bold(), word, left, y + 14, color, Align::Left);
-            } else {
-                draw_text(c, &f_xl_bold(), &amount, left, y + 14, color, Align::Left);
-                let w = text_width(&f_xl_bold(), &amount) as i32;
-                draw_text(c, &f_small(), word, left + w + 6, y + 14, color, Align::Left);
-            }
-            // The two figures behind the claim, so it can be checked rather
-            // than taken on faith.
-            if let Some(typical) = b.typical_mtd {
-                draw_text(
-                    c,
-                    &f_small(),
-                    &format!("€{} BY D{} · USUAL €{}", b.mtd_spend, day, typical),
-                    left,
-                    y + 27,
-                    C::Black,
-                    Align::Left,
-                );
-            }
-            y += 33;
-        }
-        None => {
-            draw_text(c, &f_small(), "NO BASELINE YET", left, y + 10, C::Black, Align::Left);
-            y += 18;
-        }
-    }
+    let mut y = content_y + 46;
 
     // ── Total capital, ~12 months ──
     if !b.capital.is_empty() {
         let total = b.capital_total();
-        draw_text(c, &f_small_bold(), &format!("CAPITAL {}", short_eur(total)), left, y + 8, C::Black, Align::Left);
+        // No "CAPITAL" label: a five-figure euro sum sitting above a rising
+        // line, annotated per year, doesn't need naming.
+        draw_text(c, &f_small_bold(), &short_eur(total), left, y + 8, C::Black, Align::Left);
         if let Some(first) = b.capital.first() {
             let delta = total - first.total;
             let sign = if delta < 0 { "-" } else { "+" };
@@ -1000,13 +975,15 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>, stale: Option<&str>) {
         // OVER: the shortfall, in red. HOT: what's been spent and how far
         // above this envelope's own normal, in blue. Both are measured
         // numbers — the old ">-€802" was an extrapolation presented as fact.
+        // OUT, not OVER: "over" now belongs to the month verdict up top, and
+        // one word meaning two things on one panel is worse than either.
         let (tag, tag_color, value) = if f.over {
-            ("OVER", C::Red, format!("-€{}", -f.cat.balance))
+            ("OUT", C::Red, format!("-€{}", -f.cat.balance))
         } else {
-            ("HOT ", C::Blue, format!("€{} +{}%", f.cat.spent, f.pct))
+            ("HOT", C::Blue, format!("€{}", f.cat.spent))
         };
         draw_text(c, &f_small_bold(), tag, left, y + 9, tag_color, Align::Left);
-        let label_x = left + text_width(&f_small_bold(), "OVER ") as i32 + 4;
+        let label_x = left + text_width(&f_small_bold(), "OUT ") as i32 + 4;
         draw_text(c, &f_small(), &clip_to_chars(&f.cat.label, 10), label_x, y + 9, C::Black, Align::Left);
         draw_text(c, &f_small_bold(), &value, right, y + 9, tag_color, Align::Right);
         y += row_h;
@@ -1015,7 +992,7 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>, stale: Option<&str>) {
 }
 
 /// Height of the capital chart's plot area.
-const CAPITAL_H: i32 = 32;
+const CAPITAL_H: i32 = 50;
 
 /// Total capital over ~12 month-ends, as a line on a truncated axis.
 ///

@@ -79,7 +79,7 @@ Upstream-specific env vars (leave blank to use the matching mock data) are docum
 
 The hero is **safe-to-spend per day**: what's left across the day-to-day envelopes divided by the days until payday. Payday is derived from when large inflows have actually landed over the last three months — a salary paid on the last working day is recognised as month-end rather than pinned to a date that drifts.
 
-Below it, **this month against the last three**, measured at the same day of the month so it's like for like, and stated in euros: `€531 MORE THAN USUAL`, with the two figures behind it on the line beneath. A bare percentage asks the reader to reconstruct a baseline that isn't on screen; euros are the unit every other figure on the panel already uses. A delta inside ±€25 reads as `ON USUAL PACE`, since naming rounding noise invites false precision. Savings goals are excluded from both sides — money moved into a goal is allocation, not consumption, and one lumpy investment transfer would otherwise swamp the comparison. Nothing is shown before the 3rd of the month, when the baseline is still one or two bills.
+Beside it, **how this month compares with the last three**, measured at the same day of the month so it's like for like, and reduced to a verdict: `OVER USUAL`, `ON USUAL`, or `UNDER USUAL`. The euro figure and the two numbers behind it were accurate but cost three of the panel's eight lines; direction is what a glance actually uses, and the envelope rows below say where it's coming from. The word `USUAL` appears in every variant because "over" alone doesn't say over *what*. A delta inside ±€25 reads as on-pace, since naming rounding noise invites false precision. Savings goals are excluded from both sides — money moved into a goal is allocation, not consumption, and one lumpy investment transfer would otherwise swamp the comparison. Nothing is shown before the 3rd of the month, when the baseline is still one or two bills.
 
 This replaced a spent-vs-budget pace bar. Budgets tend to be set below what a category actually costs, so measuring against them mostly reported that the budget was wrong; measuring against recent behavior reports whether *this* month is different, which is the question worth a wall panel.
 
@@ -89,8 +89,10 @@ It is a line, not bars, and deliberately so. The series sits in a narrow band fa
 
 At most two envelopes are flagged, and only for two reasons:
 
-- **OVER** — Actual's `balance` (carryover + budgeted − spent) is already negative, i.e. genuinely out of money. Using `balance` rather than `cap − spent` means an envelope that overshot this month but is still covered by accumulated funds isn't flagged.
+- **OUT** — Actual's `balance` (carryover + budgeted − spent) is already negative, i.e. genuinely out of money. Using `balance` rather than `cap − spent` means an envelope that overshot this month but is still covered by accumulated funds isn't flagged. (Named `OUT` rather than `OVER` so it doesn't collide with the month verdict above.)
 - **HOT** — spending is ≥40% above *this envelope's own* median spend by this same day-of-month over the prior three months, by at least €25, from the 4th of the month onward. Comparing an envelope to its own history catches a change in behavior; comparing it to a budget only catches an envelope that was set too low.
+
+The panel carries no month label: the dashboard header two panels over already shows the full date.
 
 Classification matches the Actual category *group* name against `ACTUALBUDGET_FIXED_GROUPS` / `ACTUALBUDGET_VARIABLE_GROUPS` / `ACTUALBUDGET_SAVINGS_GROUPS` (comma-separated, case-insensitive substrings; sensible English defaults built in), falling back to a per-category transaction-count heuristic when a group name is unrecognized. Income groups are skipped so inflows don't pollute the spend rollups.
 
