@@ -247,14 +247,66 @@ pub struct BudgetCat {
     /// carried over from prior months that month-only `cap − spent` misses.
     #[serde(default)]
     pub balance: i32,
-    /// Number of transactions in the category this month. Used to tell a
-    /// frequent day-to-day envelope (where a "burn rate" is meaningful and the
-    /// panel can project whether it's heading into the red) from a lumpy
-    /// once-a-month one (where projecting a daily rate is nonsense).
+    /// Number of transactions in the category this month. Distinguishes a
+    /// frequent day-to-day envelope from a lumpy once-a-month one; also gates
+    /// the classification fallback when a category group is unrecognized.
     #[serde(default)]
     pub txns: u32,
+    /// Median spend in this envelope by this same day-of-month over the prior
+    /// three months — the baseline the panel calls "typical". `None` when
+    /// fewer than two prior months have data: without a baseline there is
+    /// nothing to call abnormal, and guessing one produces false alarms.
+    #[serde(default)]
+    pub typical_to_date: Option<u32>,
     /// Envelope behavior class, derived from the Actual category group.
     pub class: BudgetClass,
+}
+
+/// Length of the given month, defaulting to 30 for dates chrono rejects.
+/// Shared by the fetcher (payday countdown) and the renderer (pace bar).
+pub fn days_in_month(year: i32, month: u32) -> u32 {
+    let first = chrono::NaiveDate::from_ymd_opt(year, month, 1);
+    let next = if month == 12 {
+        chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1)
+    } else {
+        chrono::NaiveDate::from_ymd_opt(year, month + 1, 1)
+    };
+    match (first, next) {
+        (Some(f), Some(n)) => (n - f).num_days() as u32,
+        _ => 30,
+    }
+}
+
+impl BudgetCat {
+    /// How far above this envelope's own normal it is running, as a percent,
+    /// when that gap is worth flagging. `None` means "nothing to say" — which
+    /// is most envelopes, most days.
+    ///
+    /// Three gates, each earning its place against the old burn-rate
+    /// projection that fired on 3 of 8 envelopes:
+    /// - **≥ +40%** — below that is ordinary month-to-month variation.
+    /// - **≥ €25 absolute** — keeps a €4-over coffee budget from shouting
+    ///   "+80%" and crowding out something that matters.
+    /// - **day ≥ 4** — the first days of a month have a baseline of one or two
+    ///   transactions, where a single early shop looks like a spending spree.
+    pub fn hot_pct(&self, day: u32) -> Option<i32> {
+        let typical = self.typical_to_date?;
+        let over = self.spent as i64 - typical as i64;
+        (typical > 0 && day >= 4 && self.spent as i64 * 5 >= typical as i64 * 7 && over >= 25)
+            .then(|| (over * 100 / typical as i64) as i32)
+    }
+}
+
+/// One month of the income-vs-spend trend strip.
+#[derive(Clone, Serialize)]
+pub struct BudgetMonth {
+    /// Three-letter month name, e.g. `JUL`.
+    pub label: String,
+    pub income: u32,
+    pub spent: u32,
+    /// True for the month still in progress — its bars are drawn hollow so a
+    /// half-finished month isn't read as a spending collapse.
+    pub partial: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -263,6 +315,19 @@ pub struct BudgetData {
     pub spent: u32,
     pub cap: u32,
     pub cats: Vec<BudgetCat>,
+    /// Income vs spend for the last six months, oldest first, current month
+    /// last. Empty when the history fetch failed — the panel drops the trend
+    /// strip rather than the whole section.
+    #[serde(default)]
+    pub history: Vec<BudgetMonth>,
+    /// Days until the next expected payday, derived from when large inflows
+    /// have historically landed. Falls back to days remaining in the month.
+    #[serde(default)]
+    pub days_to_payday: u32,
+    /// On-budget cash: Actual's `totalBalance`, i.e. every envelope balance
+    /// summed. Comes free in the month payload we already fetch.
+    #[serde(default)]
+    pub cash: i64,
 }
 
 #[derive(Clone, Serialize)]
@@ -468,21 +533,37 @@ impl DashData {
                 spent: 1842,
                 cap: 2600,
                 cats: vec![
-                    // Mock mix exercises every branch: fixed bills (some still
-                    // pending), a variable envelope already in the red (OVER), a
-                    // frequent one burning toward negative (AT RISK), a lumpy
-                    // one that's thin but shouldn't be projected (gated out),
-                    // healthy ones, and a savings goal.
-                    BudgetCat { label: "Rent".into(),        spent: 980, cap: 980, balance:    0, txns:  1, class: BudgetClass::Fixed    },
-                    BudgetCat { label: "Internet".into(),    spent:   0, cap:  50, balance:   50, txns:  0, class: BudgetClass::Fixed    },
-                    BudgetCat { label: "Insurance".into(),   spent:  60, cap:  60, balance:   40, txns:  1, class: BudgetClass::Fixed    },
-                    BudgetCat { label: "Food".into(),        spent: 512, cap: 500, balance:  -12, txns: 40, class: BudgetClass::Variable },
-                    BudgetCat { label: "Hookah".into(),      spent: 600, cap: 800, balance:   30, txns: 14, class: BudgetClass::Variable },
-                    BudgetCat { label: "Cleaning".into(),    spent: 130, cap: 130, balance:    5, txns:  1, class: BudgetClass::Variable },
-                    BudgetCat { label: "Transit".into(),     spent:  94, cap: 200, balance:  106, txns:  8, class: BudgetClass::Variable },
-                    BudgetCat { label: "Misc".into(),        spent:  46, cap: 420, balance:  374, txns:  3, class: BudgetClass::Variable },
-                    BudgetCat { label: "Vacation".into(),    spent:   0, cap: 300, balance: 1800, txns:  0, class: BudgetClass::Savings },
+                    // Mock mix exercises every branch: fixed bills (rent still
+                    // pending, so it wins the DUE line), a variable envelope
+                    // already in the red (OVER), one running well above its own
+                    // typical pace (HOT), one above its pace but under the
+                    // absolute floor (gated out), one with no baseline at all
+                    // (gated out), healthy ones, and a savings goal.
+                    BudgetCat { label: "Rent".into(),      spent: 980, cap: 980, balance:    0, txns:  1, typical_to_date: Some(980), class: BudgetClass::Fixed    },
+                    BudgetCat { label: "Internet".into(),  spent:   0, cap:  50, balance:   50, txns:  0, typical_to_date: Some( 50), class: BudgetClass::Fixed    },
+                    BudgetCat { label: "Insurance".into(), spent:  60, cap:  60, balance:   40, txns:  1, typical_to_date: Some( 60), class: BudgetClass::Fixed    },
+                    BudgetCat { label: "Food".into(),      spent: 512, cap: 500, balance:  -12, txns: 40, typical_to_date: Some(300), class: BudgetClass::Variable },
+                    BudgetCat { label: "Eating Out".into(),spent: 494, cap: 900, balance:  406, txns: 22, typical_to_date: Some(316), class: BudgetClass::Variable },
+                    BudgetCat { label: "Hookah".into(),    spent: 301, cap: 800, balance:  499, txns: 14, typical_to_date: Some(298), class: BudgetClass::Variable },
+                    BudgetCat { label: "Entertainment".into(), spent: 41, cap: 50, balance: 9, txns:  4, typical_to_date: Some( 25), class: BudgetClass::Variable },
+                    BudgetCat { label: "Cleaning".into(),  spent: 130, cap: 130, balance:    5, txns:  1, typical_to_date: None,      class: BudgetClass::Variable },
+                    BudgetCat { label: "Transit".into(),   spent:  94, cap: 200, balance:  106, txns:  8, typical_to_date: Some(110), class: BudgetClass::Variable },
+                    BudgetCat { label: "Misc".into(),      spent:  46, cap: 420, balance:  374, txns:  3, typical_to_date: Some( 60), class: BudgetClass::Variable },
+                    BudgetCat { label: "Vacation".into(),  spent:   0, cap: 300, balance: 1800, txns:  0, typical_to_date: None,      class: BudgetClass::Savings  },
                 ],
+                // Six months where two ran spend over income — the trend strip
+                // should paint those two bars red. Last entry is the month in
+                // progress and renders hollow.
+                history: vec![
+                    BudgetMonth { label: "MAR".into(), income: 7696, spent: 11738, partial: false },
+                    BudgetMonth { label: "APR".into(), income: 6918, spent:  6692, partial: false },
+                    BudgetMonth { label: "MAY".into(), income: 6918, spent:  7337, partial: false },
+                    BudgetMonth { label: "JUN".into(), income: 6928, spent:  6783, partial: false },
+                    BudgetMonth { label: "JUL".into(), income: 6921, spent:  7975, partial: false },
+                    BudgetMonth { label: "AUG".into(), income:    0, spent:  2686, partial: true  },
+                ],
+                days_to_payday: 22,
+                cash: 18581,
             }),
             alerts: vec![
                 Alert { level: "WRN".into(), time: "14:02".into(), message: "muspelheimr cpu_temp 71C > 65".into() },
@@ -495,5 +576,56 @@ impl DashData {
             // Mock data is fabricated on the spot, so nothing is ever stale.
             status: Status::all_fresh(Utc::now()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cat(spent: u32, typical: Option<u32>) -> BudgetCat {
+        BudgetCat {
+            label: "Eating Out".into(),
+            spent,
+            cap: 900,
+            balance: 406,
+            txns: 22,
+            typical_to_date: typical,
+            class: BudgetClass::Variable,
+        }
+    }
+
+    /// The case the redesign exists for: real data on 2026-08-09 had Eating
+    /// Out at €494 against a €316 norm, while Hookah (€301 vs €298) and
+    /// Groceries (€158 vs €190) were normal — yet the old burn-rate
+    /// projection flagged all three.
+    #[test]
+    fn only_genuinely_abnormal_envelopes_are_hot() {
+        assert_eq!(cat(494, Some(316)).hot_pct(9), Some(56));
+        assert_eq!(cat(301, Some(298)).hot_pct(9), None);
+        assert_eq!(cat(158, Some(190)).hot_pct(9), None);
+    }
+
+    /// A tiny envelope can double and still not be worth anyone's attention.
+    #[test]
+    fn small_absolute_overspend_stays_quiet() {
+        assert_eq!(cat(9, Some(4)).hot_pct(9), None, "+125% but only €5");
+        assert_eq!(cat(80, Some(40)).hot_pct(9), Some(100), "+100% and €40");
+    }
+
+    /// Early in the month the baseline is one or two transactions, so a single
+    /// early shop must not read as a spree.
+    #[test]
+    fn no_pace_flags_in_the_first_days() {
+        assert_eq!(cat(494, Some(316)).hot_pct(3), None);
+        assert_eq!(cat(494, Some(316)).hot_pct(4), Some(56));
+    }
+
+    /// No baseline → no claim. An envelope we've never seen before is not
+    /// evidence of overspending.
+    #[test]
+    fn missing_baseline_never_flags() {
+        assert_eq!(cat(9999, None).hot_pct(20), None);
+        assert_eq!(cat(9999, Some(0)).hot_pct(20), None);
     }
 }

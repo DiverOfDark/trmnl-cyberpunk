@@ -75,7 +75,20 @@ curl http://localhost:8080/refresh
 
 Upstream-specific env vars (leave blank to use the matching mock data) are documented in `docker-compose.yml`.
 
-The budget panel classifies each Actual envelope as **fixed** (bills/subscriptions — reported as upcoming debits), **variable** (day-to-day spend — the source of the hero "discretionary left" figure), or **savings** (goals — reported separately). Variable envelopes are flagged **OVER** when their balance is already negative, or **AT RISK** when a frequent envelope's current burn rate projects the balance negative before month-end — an advance warning before you actually run dry. Both use Actual's `balance` (carryover + budgeted − spent), so a category that overshot this month's allocation but is still covered by accumulated funds isn't falsely flagged, and the risk projection is gated on transaction frequency so lumpy once-a-month payments aren't projected from a meaningless daily rate. Classification matches the Actual category *group* name against `ACTUALBUDGET_FIXED_GROUPS` / `ACTUALBUDGET_VARIABLE_GROUPS` / `ACTUALBUDGET_SAVINGS_GROUPS` (comma-separated, case-insensitive substrings; sensible English defaults built in), falling back to a per-category transaction-count heuristic when a group name is unrecognized.
+### The budget panel
+
+The hero is **safe-to-spend per day**: what's left across the day-to-day envelopes divided by the days until payday. Payday is derived from when large inflows have actually landed over the last three months — a salary paid on the last working day is recognised as month-end rather than pinned to a date that drifts.
+
+Below it, six months of **spend bars each crossed by a tick at that month's income**. A bar poking above its tick means that month cost more than it earned, and it's drawn red. That crossing is the whole encoding — no legend needed — and it surfaces the thing a snapshot cannot: whether this is a normal month. The month in progress is drawn hollow and never reddened.
+
+`DUE` reports what's still to leave the account and names the largest unpaid bill. An unpaid rent dwarfs the discretionary pot, so a glance that misses it misreads the bank balance by thousands.
+
+At most three envelopes are flagged, and only for two reasons:
+
+- **OVER** — Actual's `balance` (carryover + budgeted − spent) is already negative, i.e. genuinely out of money. Using `balance` rather than `cap − spent` means an envelope that overshot this month but is still covered by accumulated funds isn't flagged.
+- **HOT** — spending is ≥40% above *this envelope's own* median spend by this same day-of-month over the prior three months, by at least €25, from the 4th of the month onward. Comparing an envelope to its own history catches a change in behavior; comparing it to a budget only catches an envelope that was set too low.
+
+Classification matches the Actual category *group* name against `ACTUALBUDGET_FIXED_GROUPS` / `ACTUALBUDGET_VARIABLE_GROUPS` / `ACTUALBUDGET_SAVINGS_GROUPS` (comma-separated, case-insensitive substrings; sensible English defaults built in), falling back to a per-category transaction-count heuristic when a group name is unrecognized. Income groups are skipped so inflows don't pollute the spend rollups.
 
 ---
 

@@ -848,34 +848,40 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>, stale: Option<&str>) {
     };
 
     let pad_x = 10i32;
+    let left = panel.x + pad_x;
+    let right = panel.right() - pad_x;
+    let inner_w = (panel.w as i32 - pad_x * 2) as u32;
 
     let now = chrono::Local::now();
     let dim = days_in_month(now.year(), now.month());
     let day = now.day();
-    let days_left = dim.saturating_sub(day) + 1; // today still counts
     let month_pct = if dim == 0 { 0.0 } else { day as f32 / dim as f32 };
 
     // ── Roll the envelopes up by class ──
     //
-    // The hero number is *discretionary* money — what's actually left in the
-    // day-to-day (Variable) envelopes — not "everything budgeted minus spent",
-    // which would be dominated by an unpaid rent and savings-goal transfers and
-    // wildly overstate spendable cash. Fixed bills and savings goals each get
-    // their own one-line rollup at the bottom.
-    // A flagged variable envelope: `over` when already in the red, otherwise
-    // AT RISK with `proj` = projected end-of-month balance at the current rate.
-    struct Flag<'a> { cat: &'a BudgetCat, over: bool, proj: i64 }
+    // Discretionary money — what's left in the day-to-day (Variable)
+    // envelopes — drives the hero. "Everything budgeted minus spent" would be
+    // dominated by an unpaid rent and savings transfers and wildly overstate
+    // spendable cash, so Fixed and Savings are handled separately.
+    //
+    // A flagged envelope is either `over` (balance already negative — out of
+    // money) or hot (spending well ahead of what this envelope normally costs
+    // by this point in the month). The second replaces the old end-of-month
+    // projection, which extrapolated a handful of days across the rest of the
+    // month and fired on envelopes that were merely tightly budgeted.
+    struct Flag<'a> {
+        cat: &'a BudgetCat,
+        over: bool,
+        /// Percent above this envelope's own typical spend by today. Unused
+        /// for `over` rows, which report the shortfall instead.
+        pct: i32,
+    }
     let mut flags: Vec<Flag> = Vec::new();
-    let mut disc_balance: i64 = 0; // net money left in discretionary envelopes
+    let mut disc_balance: i64 = 0;
     let mut var_cap: u32 = 0;
     let mut var_spent: u32 = 0;
-    let mut fixed_count = 0u32;
-    let mut fixed_due: i64 = 0; // cap − spent, clamped ≥0 → upcoming debits
-    let mut savings_count = 0u32;
-    let mut savings_alloc: u32 = 0; // budgeted into goals this month
-
-    let elapsed = day.max(1); // days into the month, today included
-    let remaining = dim.saturating_sub(day); // whole days still to come
+    let mut fixed_due: i64 = 0;
+    let mut fixed_top: Option<(&str, i64)> = None;
 
     for cat in &b.cats {
         match cat.class {
@@ -883,68 +889,57 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>, stale: Option<&str>) {
                 disc_balance += cat.balance as i64;
                 var_cap += cat.cap;
                 var_spent += cat.spent;
-                // `balance` already folds in carryover (carryover + budgeted −
-                // spent), so it's the truth for "is this envelope healthy".
                 if cat.balance < 0 {
-                    // Already overspent — hard flag regardless of pace.
-                    flags.push(Flag { cat, over: true, proj: cat.balance as i64 });
-                } else if cat.txns >= 3 {
-                    // Frequent day-to-day envelope: project the balance to
-                    // month-end at the current burn rate and warn *before* it
-                    // goes negative. Gated on txns ≥ 3 so a lumpy once-a-month
-                    // payment (whose "daily rate" is meaningless) isn't flagged
-                    // just for being thin late in the month.
-                    let daily = cat.spent as f32 / elapsed as f32;
-                    let proj = cat.balance as f32 - daily * remaining as f32;
-                    if proj < 0.0 {
-                        flags.push(Flag { cat, over: false, proj: proj.round() as i64 });
-                    }
+                    // `balance` folds in carryover, so a negative one means
+                    // the envelope is genuinely out of money — hard flag.
+                    flags.push(Flag { cat, over: true, pct: 0 });
+                } else if let Some(pct) = cat.hot_pct(day) {
+                    flags.push(Flag { cat, over: false, pct });
                 }
             }
             BudgetClass::Fixed => {
-                fixed_count += 1;
-                fixed_due += (cat.cap as i64 - cat.spent as i64).max(0);
+                let due = (cat.cap as i64 - cat.spent as i64).max(0);
+                fixed_due += due;
+                if due > fixed_top.map_or(0, |(_, d)| d) {
+                    fixed_top = Some((cat.label.as_str(), due));
+                }
             }
-            BudgetClass::Savings => {
-                savings_count += 1;
-                savings_alloc += cat.cap;
-            }
+            // Savings goals are money deliberately parked; they neither count
+            // as spendable nor as a debit still to come.
+            BudgetClass::Savings => {}
         }
     }
-    // Already-overspent first, then deepest projected shortfall.
+    // Out-of-money first (deepest), then furthest above normal.
     flags.sort_by(|a, b| {
-        b.over.cmp(&a.over).then(a.proj.cmp(&b.proj))
+        b.over
+            .cmp(&a.over)
+            .then(a.cat.balance.cmp(&b.cat.balance))
+            .then(b.pct.cmp(&a.pct))
     });
 
-    // ── Hero: discretionary € left + month + days/runway ──
-    let hero = if disc_balance >= 0 {
-        format!("€{disc_balance}")
-    } else {
-        format!("-€{}", -disc_balance)
-    };
-    let hero_color = if disc_balance >= 0 { C::Black } else { C::Red };
-    draw_text(c, &f_huge_bold(), &hero, panel.x + pad_x, content_y + 22, hero_color, Align::Left);
+    // ── Hero: what today's spending allowance is ──
+    //
+    // Safe-to-spend per day is the number that changes behavior; the pot it
+    // comes from is context, so it moves to the footer line.
+    let days = b.days_to_payday.max(1);
+    let per_day = disc_balance.max(0) / days as i64;
+    let hero = format!("€{per_day}");
+    let hero_color = if disc_balance < 0 { C::Red } else { C::Black };
+    draw_text(c, &f_huge_bold(), &hero, left, content_y + 22, hero_color, Align::Left);
     let hero_w = text_width(&f_huge_bold(), &hero) as i32;
-    let suffix = if disc_balance >= 0 { "LEFT" } else { "OVER" };
-    draw_text(c, &f_small_bold(), suffix, panel.x + pad_x + hero_w + 6, content_y + 22, hero_color, Align::Left);
-    draw_text(c, &f_small(), &b.month_label, panel.right() - pad_x, content_y + 22, C::Black, Align::Right);
+    draw_text(c, &f_small_bold(), "/DAY", left + hero_w + 4, content_y + 22, hero_color, Align::Left);
+    draw_text(c, &f_small(), &b.month_label, right, content_y + 22, C::Black, Align::Right);
 
-    // Days remaining + safe-to-spend €/day over the discretionary balance.
-    let per_day = if days_left == 0 { 0 } else { disc_balance.max(0) as u32 / days_left.max(1) };
-    draw_text(
-        c,
-        &f_small(),
-        &format!("{days_left}D LEFT · €{per_day}/D SAFE"),
-        panel.x + pad_x,
-        content_y + 36,
-        C::Black,
-        Align::Left,
-    );
+    let sub = match b.days_to_payday {
+        0 => "SAFE · PAYDAY TODAY".to_string(),
+        d => format!("SAFE · {d}D TO PAYDAY"),
+    };
+    draw_text(c, &f_small(), &sub, left, content_y + 36, C::Black, Align::Left);
 
-    // ── Discretionary progress bar (spent vs cap of Variable envelopes) ──
+    // ── Discretionary pace bar (spent vs cap of Variable envelopes) ──
     // Color encodes pace: red over budget, yellow ahead of the calendar,
     // green on/under pace.
-    let bar = Rect::new(panel.x + pad_x, content_y + 42, (panel.w as i32 - pad_x * 2) as u32, 6);
+    let bar = Rect::new(left, content_y + 42, inner_w, 6);
     c.stroke_rect(bar, 1, C::Black);
     if var_cap > 0 {
         let ratio = var_spent as f32 / var_cap as f32;
@@ -960,83 +955,143 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>, stale: Option<&str>) {
         }
     }
 
-    // ── Flagged-envelope list (rendered in available space) ──
-    //
-    // OVER rows (already negative balance) show the current shortfall in red;
-    // AT RISK rows (projected to end the month negative at the current burn
-    // rate) show that projection with a "→" in yellow — the advance warning.
-    let row_h = 12i32;
-    let header_y = content_y + 58;
-    // Reserve last 26 px for the two summary lines.
-    let summary_top = panel.bottom() - 4 - row_h * 2;
-    let list_top = header_y + row_h;
-    let max_rows = (((summary_top - list_top) / row_h).max(0) as usize).min(flags.len());
-
-    if !flags.is_empty() {
-        // Header adapts to the mix: all-overspent → "OVERSPENT" (red),
-        // all-projected → "AT RISK" (blue), both → "OVER/RISK" (red). Yellow
-        // is unreadable as text on the light panel, so red/blue carry severity.
-        let over_n = flags.iter().filter(|f| f.over).count();
-        let risk_n = flags.len() - over_n;
-        let (title, header_color) = match (over_n, risk_n) {
-            (_, 0) => ("OVERSPENT", C::Red),
-            (0, _) => ("AT RISK", C::Blue),
-            _ => ("OVER/RISK", C::Red),
-        };
-        draw_text(
-            c,
-            &f_small_bold(),
-            &format!("{title} ({})", flags.len()),
-            panel.x + pad_x,
-            header_y + 9,
-            header_color,
-            Align::Left,
-        );
-        for (i, f) in flags.iter().take(max_rows).enumerate() {
-            let y = list_top + i as i32 * row_h;
-            let label = clip_to_chars(&f.cat.label, 14);
-            draw_text(c, &f_small(), &label, panel.x + pad_x, y + 9, C::Black, Align::Left);
-            // OVER: current shortfall in red. AT RISK: projected end balance,
-            // prefixed ">" ("trending to"), in blue. ASCII only — the u8g2
-            // Latin fonts have no "→" glyph, and yellow text is unreadable on
-            // the light panel, so red/blue + ">" carry the two states.
-            let (txt, col) = if f.over {
-                (format!("-€{}", -f.proj), C::Red)
-            } else {
-                (format!(">-€{}", -f.proj), C::Blue)
-            };
-            draw_text(c, &f_small_bold(), &txt, panel.right() - pad_x, y + 9, col, Align::Right);
-        }
-    } else {
-        draw_text(c, &f_small_bold(), "ALL ON TRACK", panel.x + pad_x, header_y + 9, C::Green, Align::Left);
+    // ── Income vs spend, last six months ──
+    let mut y = content_y + 54;
+    if !b.history.is_empty() {
+        draw_trend(c, left, y, inner_w, &b.history);
+        y += TREND_H;
     }
 
-    // ── Two summary lines pinned to bottom: upcoming fixed debits + savings ──
-    let s1 = if fixed_due == 0 {
-        format!("FIXED   ({fixed_count}): PAID")
-    } else {
-        format!("FIXED   ({fixed_count}): €{fixed_due} DUE")
+    // ── What's still going to leave the account ──
+    //
+    // Promoted out of the old footnote: an unpaid rent dwarfs the
+    // discretionary pot, and a glance that misses it misreads the bank
+    // balance by thousands.
+    let due_line = match (fixed_due, fixed_top) {
+        (0, _) => "DUE  ALL BILLS PAID".to_string(),
+        (total, Some((label, top))) => {
+            format!("DUE  €{total} · {} {top}", clip_to_chars(label, 8))
+        }
+        (total, None) => format!("DUE  €{total}"),
     };
-    let s2 = if savings_count > 0 {
-        format!("SAVINGS ({savings_count}): €{savings_alloc} SET")
+    draw_text(c, &f_small(), &due_line, left, y + 12, C::Black, Align::Left);
+    y += 20;
+
+    // ── Flagged envelopes: at most two, so the panel stays scannable ──
+    let row_h = 13i32;
+    let footer_y = panel.bottom() - 8;
+    // Three rows maximum: past that the list stops being a signal and starts
+    // being a wall, which is what the old projection-based panel produced.
+    let max_rows = (((footer_y - row_h - y) / row_h).max(0) as usize).min(3);
+    if flags.is_empty() {
+        draw_text(c, &f_small_bold(), "ALL ON TRACK", left, y + 9, C::Green, Align::Left);
+    }
+    for f in flags.iter().take(max_rows) {
+        // OVER: the shortfall, in red. HOT: what's been spent and how far
+        // above this envelope's own normal, in blue. Both are measured
+        // numbers — the old ">-€802" was an extrapolation presented as fact.
+        let (tag, tag_color, value) = if f.over {
+            ("OVER", C::Red, format!("-€{}", -f.cat.balance))
+        } else {
+            ("HOT ", C::Blue, format!("€{} +{}%", f.cat.spent, f.pct))
+        };
+        draw_text(c, &f_small_bold(), tag, left, y + 9, tag_color, Align::Left);
+        let label_x = left + text_width(&f_small_bold(), "OVER ") as i32 + 4;
+        draw_text(c, &f_small(), &clip_to_chars(&f.cat.label, 10), label_x, y + 9, C::Black, Align::Left);
+        draw_text(c, &f_small_bold(), &value, right, y + 9, tag_color, Align::Right);
+        y += row_h;
+    }
+
+    // ── Footer context: the pot behind the hero, and the cash behind it all ──
+    let left_txt = if disc_balance >= 0 {
+        format!("LEFT €{disc_balance}")
     } else {
-        // No savings group configured — recap discretionary instead.
-        format!("DISCR.  : €{} OF €{var_cap} USED", var_spent.min(var_cap))
+        format!("OVER €{}", -disc_balance)
     };
-    draw_text(c, &f_small(), &s1, panel.x + pad_x, summary_top + 9,         C::Black, Align::Left);
-    draw_text(c, &f_small(), &s2, panel.x + pad_x, summary_top + 9 + row_h, C::Black, Align::Left);
+    draw_text(c, &f_small(), &left_txt, left, footer_y, C::Black, Align::Left);
+    if b.cash != 0 {
+        draw_text(c, &f_small(), &format!("CASH {}", short_eur(b.cash)), right, footer_y, C::Black, Align::Right);
+    }
 }
 
-fn days_in_month(year: i32, month: u32) -> u32 {
-    let next_first = if month == 12 {
-        chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1)
+/// Total height of the trend strip.
+const TREND_H: i32 = 34;
+
+/// Six months of spend as bars, each crossed by a tick at that month's income.
+///
+/// Encoding spend-vs-income as a *crossing* rather than two rows of bars is
+/// what makes this legible at 26px: a bar poking above its own income tick
+/// means that month cost more than it earned, and no legend is needed to see
+/// it. Since income is usually near-constant the ticks line up into a visual
+/// rule, so the eye reads a single threshold. The month still in progress is
+/// drawn hollow and never reddened — it hasn't finished losing yet.
+fn draw_trend(c: &mut Canvas, x: i32, y: i32, w: u32, months: &[BudgetMonth]) {
+    let show: Vec<&BudgetMonth> = months.iter().rev().take(6).rev().collect();
+    let scale = show
+        .iter()
+        .map(|m| m.income.max(m.spent))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+
+    let bar_w = 9u32;
+    let gap = 4i32;
+    let max_h = 24u32;
+    let base = y + 26;
+    let h_of = |v: u32| ((v as u64 * max_h as u64 / scale as u64) as u32).max(1);
+
+    for (i, m) in show.iter().enumerate() {
+        let bx = x + i as i32 * (bar_w as i32 + gap);
+        let sh = h_of(m.spent);
+        let bar = Rect::new(bx, base - sh as i32, bar_w, sh);
+        let over = m.spent > m.income && !m.partial;
+        if m.partial {
+            c.stroke_rect(bar, 1, C::Black);
+        } else {
+            c.fill_rect(bar, if over { C::Red } else { C::Black });
+        }
+        // Income tick, drawn 2px proud of the bar on each side so it reads as
+        // a threshold the bar crosses rather than part of the bar.
+        if m.income > 0 {
+            let ih = h_of(m.income);
+            c.hline(bx - 2, base - ih as i32, bar_w + 4, C::Black);
+        }
+    }
+    // Floor rule, so short bars still have something to stand on.
+    c.hline(x, base + 2, 6 * (bar_w + gap as u32), C::Black);
+
+    // Annotations: the income line's value, and the worst month of the run —
+    // the number the whole strip exists to surface.
+    let complete: Vec<&&BudgetMonth> = show.iter().filter(|m| !m.partial).collect();
+    if complete.is_empty() {
+        return;
+    }
+    let avg: u32 =
+        (complete.iter().map(|m| m.income as u64).sum::<u64>() / complete.len() as u64) as u32;
+    draw_text(c, &f_small(), &format!("{}/MO IN", short_eur(avg as i64)), x + w as i32, y + 12, C::Black, Align::Right);
+
+    let worst = complete
+        .iter()
+        .min_by_key(|m| m.income as i64 - m.spent as i64)
+        .unwrap();
+    let net = worst.income as i64 - worst.spent as i64;
+    let (txt, color) = if net < 0 {
+        (format!("{} -{}", worst.label, -net), C::Red)
     } else {
-        chrono::NaiveDate::from_ymd_opt(year, month + 1, 1)
+        (format!("{} +{net}", worst.label), C::Black)
     };
-    let this_first = chrono::NaiveDate::from_ymd_opt(year, month, 1);
-    match (next_first, this_first) {
-        (Some(n), Some(t)) => (n - t).num_days() as u32,
-        _ => 30,
+    draw_text(c, &f_small(), &txt, x + w as i32, y + 26, color, Align::Right);
+}
+
+/// Euro amount shortened for the tight footer/annotation slots: `€18.6K`
+/// above a thousand, plain euros below.
+fn short_eur(v: i64) -> String {
+    let neg = if v < 0 { "-" } else { "" };
+    let a = v.unsigned_abs();
+    if a >= 1000 {
+        format!("{neg}€{}.{}K", a / 1000, (a % 1000) / 100)
+    } else {
+        format!("{neg}€{a}")
     }
 }
 

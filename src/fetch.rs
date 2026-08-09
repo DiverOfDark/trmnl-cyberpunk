@@ -949,27 +949,32 @@ impl Sources {
         }
 
         let now = Local::now();
+        let today = now.date_naive();
         let month = format!("{}-{:02}", now.year(), now.month());
-        let month_start = format!("{:04}-{:02}-01", now.year(), now.month());
 
-        // Fetch the month aggregate and the per-category transaction counts
-        // in parallel. The transaction counts feed our fixed/variable
-        // classifier (≤ 2 transactions in the month → fixed-cost envelope).
+        // Three pulls in parallel: this month's aggregate, one pass over
+        // recent transactions (counts + pace baselines + payday), and the
+        // five prior months for the trend strip. Only the first is fatal —
+        // the other two degrade the panel rather than blanking it.
         let month_url = format!(
             "{}/budgets/{}/months/{}",
             self.actualbudget_url, self.actualbudget_sync_id, month,
         );
-        let (month_r, txn_counts_r) = tokio::join!(
+        let (month_r, history_r, trend) = tokio::join!(
             get_json(
                 &self.client,
                 &month_url,
                 &self.actualbudget_key,
                 &self.actualbudget_password
             ),
-            self.transaction_counts_by_category(&month_start),
+            self.spend_history(today),
+            self.month_history(today),
         );
         let month_data: Value = month_r?;
-        let tx_counts: HashMap<String, u32> = txn_counts_r.unwrap_or_default();
+        let hist = history_r.unwrap_or_else(|e| {
+            warn!("budget spend history unavailable ({e:#}); pace flags and payday disabled");
+            SpendHistory::default()
+        });
 
         let cats_raw = month_data["data"]["categoryGroups"]
             .as_array()
@@ -1006,7 +1011,7 @@ impl Sources {
                     if cap > 0 || spent > 0 {
                         total_spent += spent;
                         total_cap += cap;
-                        let count = tx_counts.get(id).copied().unwrap_or(0);
+                        let count = hist.counts.get(id).copied().unwrap_or(0);
                         // Fallback: ≤ 2 transactions/month reads as a fixed
                         // lump; more than that is day-to-day variable spend.
                         let class = group_class.unwrap_or(if count <= 2 {
@@ -1020,6 +1025,7 @@ impl Sources {
                             cap,
                             balance,
                             txns: count,
+                            typical_to_date: hist.typical.get(id).copied(),
                             class,
                         });
                     }
@@ -1041,34 +1047,97 @@ impl Sources {
             &now.format("%Y").to_string()[2..]
         );
 
+        // Trend strip: the five prior months plus the one in progress. The
+        // current month's own totals come from the aggregate we already have,
+        // so it costs no extra request.
+        let d = &month_data["data"];
+        let eur = |v: &Value| (v.as_f64().unwrap_or(0.0).abs() / 100.0).round() as u32;
+        let mut history = trend;
+        history.push(BudgetMonth {
+            label: months[(now.month() - 1) as usize].to_string(),
+            income: eur(&d["totalIncome"]),
+            spent: eur(&d["totalSpent"]),
+            partial: true,
+        });
+
         Ok(BudgetData {
             month_label,
             spent: total_spent,
             cap: total_cap,
             cats,
+            history,
+            days_to_payday: days_to_payday(today, hist.payday),
+            // `totalBalance` is every envelope balance summed, which for an
+            // on-budget file is exactly the cash backing it.
+            cash: (d["totalBalance"].as_f64().unwrap_or(0.0) / 100.0).round() as i64,
         })
     }
 
-    /// Run an ActualQL query that groups transactions by category for the
-    /// current month, returning a `category_id → count` map. Used to
-    /// classify envelopes as fixed (≤ 2 transactions) vs variable. If the
-    /// query fails for any reason, the caller should treat it as "no
-    /// data" and fall back to all-variable — better to over-warn than
-    /// silently mis-classify.
-    async fn transaction_counts_by_category(&self, since: &str) -> Result<HashMap<String, u32>> {
+    /// Income and spend totals for the five months preceding `today`, oldest
+    /// first. Individual months that fail are dropped rather than failing the
+    /// budget — a short trend strip beats no budget panel.
+    async fn month_history(&self, today: NaiveDate) -> Vec<BudgetMonth> {
+        const MONTHS: [&str; 12] = [
+            "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+        ];
+        let wanted: Vec<NaiveDate> = (1..=5).rev().filter_map(|n| months_before(today, n)).collect();
+
+        let fetched = futures::future::join_all(wanted.iter().map(|d| {
+            let url = format!(
+                "{}/budgets/{}/months/{}-{:02}",
+                self.actualbudget_url,
+                self.actualbudget_sync_id,
+                d.year(),
+                d.month(),
+            );
+            async move {
+                get_json(
+                    &self.client,
+                    &url,
+                    &self.actualbudget_key,
+                    &self.actualbudget_password,
+                )
+                .await
+            }
+        }))
+        .await;
+
+        wanted
+            .iter()
+            .zip(fetched)
+            .filter_map(|(d, r)| {
+                let v: Value = r.ok()?;
+                let eur = |x: &Value| (x.as_f64().unwrap_or(0.0).abs() / 100.0).round() as u32;
+                Some(BudgetMonth {
+                    label: MONTHS[(d.month() - 1) as usize].to_string(),
+                    income: eur(&v["data"]["totalIncome"]),
+                    spent: eur(&v["data"]["totalSpent"]),
+                    partial: false,
+                })
+            })
+            .collect()
+    }
+
+    /// One pass over the last four months of transactions, yielding every
+    /// per-transaction signal the panel needs. Pulling the rows once and
+    /// folding them three ways beats three round-trips, and Actual's
+    /// `calculate`/`groupBy` syntax varies enough between versions that
+    /// aggregating client-side is the stable option. ~500 rows / 64 KB for a
+    /// household budget, fetched on the background timer.
+    async fn spend_history(&self, today: NaiveDate) -> Result<SpendHistory> {
         let url = format!(
             "{}/budgets/{}/run-query",
             self.actualbudget_url, self.actualbudget_sync_id,
         );
-        // ActualQL: select category for every transaction since the start
-        // of the current month. We count rows per category client-side,
-        // which is simpler than wrestling with `calculate: { $count: ... }`
-        // syntax variants.
+        let since = months_before(today, 3)
+            .unwrap_or(today)
+            .format("%Y-%m-01")
+            .to_string();
         let body = serde_json::json!({
             "ActualQLquery": {
                 "table": "transactions",
                 "filter": { "date": { "$gte": since } },
-                "select": ["category"],
+                "select": ["date", "amount", "category"],
             }
         });
         let v: Value = with_retry(&format!("POST {url}"), 3, || async {
@@ -1094,21 +1163,138 @@ impl Sources {
         })
         .await?;
 
-        let mut out: HashMap<String, u32> = HashMap::new();
         // The response shape is `{ "data": [...] }` but `data` may be a
         // bare array or wrapped further depending on Actual's version;
         // accept either.
         let rows = v["data"]
             .as_array()
-            .or_else(|| v["data"]["data"].as_array());
-        if let Some(rows) = rows {
-            for row in rows {
-                if let Some(cat) = row["category"].as_str() {
-                    *out.entry(cat.to_string()).or_insert(0) += 1;
+            .or_else(|| v["data"]["data"].as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut out = SpendHistory::default();
+        // Spend so far this month per (category, month), counted only up to
+        // today's day-of-month so past months are compared like for like —
+        // "€494 by the 9th" against "€316 by the 9th", not against a full
+        // month's total. Accumulated in cents and rounded once at the end;
+        // rounding each transaction first loses up to €1 apiece, which across
+        // a busy envelope shifts the baseline enough to move the percentage.
+        let mut to_date: HashMap<(String, u32), u64> = HashMap::new();
+        // Largest inflow seen in each month, and the day it landed.
+        let mut top_inflow: HashMap<u32, (i64, u32)> = HashMap::new();
+
+        for row in &rows {
+            let Some(date) = row["date"]
+                .as_str()
+                .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+            else {
+                continue;
+            };
+            let amount = row["amount"].as_i64().unwrap_or(0);
+            let key = date.year() as u32 * 12 + date.month();
+
+            if amount > 0 {
+                let slot = top_inflow.entry(key).or_insert((0, date.day()));
+                if amount > slot.0 {
+                    *slot = (amount, date.day());
                 }
+                continue;
+            }
+            let Some(cat) = row["category"].as_str() else {
+                continue;
+            };
+            if date.year() == today.year() && date.month() == today.month() {
+                *out.counts.entry(cat.to_string()).or_insert(0) += 1;
+            }
+            if date.day() <= today.day() {
+                *to_date.entry((cat.to_string(), key)).or_insert(0) += amount.unsigned_abs();
             }
         }
+
+        // Baseline per category: the median of the three prior months'
+        // spend-by-this-day. Needs at least two of them to have activity —
+        // one month is an anecdote, not a norm, and treating a missing month
+        // as a €0 baseline would flag every returning category as abnormal.
+        let this_key = today.year() as u32 * 12 + today.month();
+        let prior: Vec<u32> = (1..=3).map(|n| this_key - n).collect();
+        let mut cats: Vec<String> = to_date.keys().map(|(c, _)| c.clone()).collect();
+        cats.sort();
+        cats.dedup();
+        for cat in cats {
+            let mut seen: Vec<u32> = prior
+                .iter()
+                .filter_map(|k| to_date.get(&(cat.clone(), *k)).copied())
+                .map(|cents| ((cents as f64) / 100.0).round() as u32)
+                .collect();
+            if seen.len() < 2 {
+                continue;
+            }
+            seen.sort_unstable();
+            out.typical.insert(cat, seen[seen.len() / 2]);
+        }
+
+        // Payday: the day of the month the biggest inflow usually lands on.
+        // Salaries paid "last working day" drift across 28th-31st, so if most
+        // sightings sit near a month end we call the whole schedule month-end
+        // rather than averaging into a meaningless mid-month date.
+        let mut days: Vec<u32> = prior
+            .iter()
+            .filter_map(|k| top_inflow.get(k))
+            .map(|(_, day)| *day)
+            .collect();
+        if !days.is_empty() {
+            days.sort_unstable();
+            let near_end = days.iter().filter(|d| **d >= 28).count();
+            out.payday = Some(if near_end * 2 >= days.len() {
+                MONTH_END
+            } else {
+                days[days.len() / 2]
+            });
+        }
+
         Ok(out)
+    }
+}
+
+/// Sentinel day-of-month meaning "the last day of whatever month it is",
+/// which is where a "paid on the last working day" salary lands.
+const MONTH_END: u32 = 99;
+
+/// Per-transaction signals folded out of one `spend_history` pass.
+#[derive(Default)]
+struct SpendHistory {
+    /// category id → transactions posted this month.
+    counts: HashMap<String, u32>,
+    /// category id → typical spend by this day-of-month (euros).
+    typical: HashMap<String, u32>,
+    /// Day of month large inflows land on, or [`MONTH_END`].
+    payday: Option<u32>,
+}
+
+/// `today` shifted back `n` whole months, clamped to the 1st so month lengths
+/// never matter.
+fn months_before(today: NaiveDate, n: u32) -> Option<NaiveDate> {
+    let total = today.year() * 12 + today.month0() as i32 - n as i32;
+    NaiveDate::from_ymd_opt(total.div_euclid(12), total.rem_euclid(12) as u32 + 1, 1)
+}
+
+/// Days until the next `payday`, counting today as 0. Falls back to the days
+/// left in this month when we have no income history — which for a salary
+/// paid at month end is the same answer anyway.
+fn days_to_payday(today: NaiveDate, payday: Option<u32>) -> u32 {
+    let dim = days_in_month(today.year(), today.month());
+    let Some(day) = payday else {
+        return dim.saturating_sub(today.day());
+    };
+    if day == MONTH_END {
+        return dim.saturating_sub(today.day());
+    }
+    if day >= today.day() {
+        day - today.day()
+    } else {
+        // Already passed this month: next one, using this month's length as
+        // the stride. Close enough for a countdown rendered in whole days.
+        dim - today.day() + day
     }
 }
 
@@ -1553,6 +1739,9 @@ mod tests {
             spent,
             cap,
             cats: Vec::new(),
+            history: Vec::new(),
+            days_to_payday: 0,
+            cash: 0,
         }
     }
 
@@ -1687,6 +1876,35 @@ mod tests {
         assert_eq!(status.sys().marker(now).as_deref(), Some("STALE 3h"));
         assert_eq!(status.wx().marker(now), None);
         assert_eq!(status.degraded(now), vec![("SYS", "STALE 3h".to_string())]);
+    }
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    /// The three-month lookback has to survive January without landing on
+    /// month 0 or the wrong year.
+    #[test]
+    fn months_before_crosses_year_boundary() {
+        assert_eq!(months_before(d(2026, 8, 9), 3), Some(d(2026, 5, 1)));
+        assert_eq!(months_before(d(2026, 1, 15), 3), Some(d(2025, 10, 1)));
+        assert_eq!(months_before(d(2026, 1, 31), 1), Some(d(2025, 12, 1)));
+        // Always the 1st, so a 31st never spills into the next month.
+        assert_eq!(months_before(d(2026, 3, 31), 1), Some(d(2026, 2, 1)));
+    }
+
+    /// A salary paid "last working day" drifts across the 28th-31st, so the
+    /// countdown has to mean end-of-month rather than a specific date.
+    #[test]
+    fn payday_countdown_handles_month_end_and_wrap() {
+        // Month-end schedule: 22 days from Aug 9 to Aug 31.
+        assert_eq!(days_to_payday(d(2026, 8, 9), Some(MONTH_END)), 22);
+        // Fixed mid-month payday still ahead of us.
+        assert_eq!(days_to_payday(d(2026, 8, 9), Some(15)), 6);
+        // Already passed → next month's.
+        assert_eq!(days_to_payday(d(2026, 8, 20), Some(15)), 26);
+        // No income history → days left in the month, the old behavior.
+        assert_eq!(days_to_payday(d(2026, 8, 9), None), 22);
     }
 
     /// `tokio::time::error::Elapsed` has no public constructor, so brew a
