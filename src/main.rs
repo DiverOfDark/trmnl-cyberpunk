@@ -5,6 +5,7 @@ mod render;
 mod windows_tz;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     extract::State,
@@ -37,9 +38,8 @@ struct AppState {
     device_state: Arc<RwLock<DeviceState>>,
     data: Arc<RwLock<DashData>>,
     sources: Arc<Sources>,
-    /// Serializes upstream-fetch runs. Every `/dashboard*` request triggers
-    /// a fetch, so without this a burst of requests would fan out into N
-    /// parallel upstream pulls.
+    /// Serializes upstream-fetch runs so a manual `/refresh` landing mid-cycle
+    /// can't fan out into a second parallel pull of every upstream.
     fetch_lock: Arc<tokio::sync::Mutex<()>>,
     local_mode: bool,
 }
@@ -60,6 +60,18 @@ fn refresh_secs() -> u32 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(3600)
+}
+
+/// How often the background refresher pulls upstream. Independent of
+/// `REFRESH_SECS` (how often the *device* wakes up): the device should always
+/// find a rendered-in-milliseconds image waiting, which means the data behind
+/// it has to be refreshed on our own clock, not the device's.
+fn fetch_interval_secs() -> u64 {
+    std::env::var("FETCH_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(300)
 }
 
 /// Filename the firmware uses as its 24h dedupe cache key. It expects a
@@ -93,15 +105,38 @@ fn build_display_response(epoch: i64) -> DisplayResponse {
 async fn refresh_data(state: &AppState) {
     let _guard = state.fetch_lock.lock().await;
 
-    let mock = DashData::mock();
-    let cached_budget = state.data.read().await.budget.clone();
+    let prev = state.data.read().await.clone();
     let fresh = if state.local_mode {
-        mock
+        DashData::mock()
     } else {
-        state.sources.fetch(&mock, cached_budget).await
+        // Hand the previous snapshot down so sections whose upstream is
+        // failing keep their last good values (flagged stale) rather than
+        // blanking their panel.
+        state.sources.fetch(&prev).await
     };
+    let degraded = fresh.status.degraded(chrono::Utc::now());
     *state.data.write().await = fresh;
-    info!("data refreshed");
+    if degraded.is_empty() {
+        info!("data refreshed");
+    } else {
+        let summary = degraded
+            .iter()
+            .map(|(tag, marker)| format!("{tag} {marker}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        info!("data refreshed; degraded: {summary}");
+    }
+}
+
+/// Refresh upstream data on a fixed cadence, decoupled from HTTP traffic.
+/// `/dashboard*` used to fetch inline, which made every device poll wait out
+/// the slowest upstream (retries and all) before a single pixel was drawn.
+async fn refresh_loop(state: AppState) {
+    let interval = Duration::from_secs(fetch_interval_secs());
+    loop {
+        tokio::time::sleep(interval).await;
+        refresh_data(&state).await;
+    }
 }
 
 /// Render the current `state.data` to a PNG. Called per-request from
@@ -165,9 +200,10 @@ async fn api_log(State(_): State<AppState>, device: DeviceInfo, body: String) ->
 }
 
 async fn serve_png(State(state): State<AppState>) -> Response {
-    // Every request → fresh upstream pull → fresh render. Matches the user
-    // expectation that pressing the device's refresh button gets new data.
-    refresh_data(&state).await;
+    // Render straight from the cache the background refresher maintains — the
+    // device gets its PNG in milliseconds instead of waiting on upstreams.
+    // Anything the refresher couldn't reach is drawn with a STALE marker, so
+    // serving cached data never passes as current.
     match render_now(&state).await {
         Ok(bytes) => (
             StatusCode::OK,
@@ -223,9 +259,15 @@ async fn main() {
         .expect("bind failed");
     let bound = listener.local_addr().unwrap();
 
-    // Initial DashData uses mock so the layout has content until the first
-    // `/dashboard*` request triggers an upstream fetch.
-    let initial_data = DashData::mock();
+    // Serving real data means starting empty: a request arriving in the second
+    // or two before the priming fetch lands gets empty panels rather than mock
+    // numbers a viewer would read as real. LOCAL_MODE is the one place mock
+    // data belongs.
+    let initial_data = if local_mode {
+        DashData::mock()
+    } else {
+        DashData::empty()
+    };
 
     let state = AppState {
         device_state: Arc::new(RwLock::new(DeviceState::default())),
@@ -269,6 +311,17 @@ async fn main() {
         return;
     }
 
+    // Prime the cache before serving, then keep it warm on a timer. Both the
+    // priming pull and the loop are detached so a slow upstream delays only
+    // the data, not the listener.
+    tokio::spawn({
+        let state = state.clone();
+        async move {
+            refresh_data(&state).await;
+            refresh_loop(state).await;
+        }
+    });
+
     info!(
         "Listening on http://{bound}{}",
         if local_mode {
@@ -277,6 +330,7 @@ async fn main() {
             ""
         }
     );
+    info!("Refreshing upstream data every {}s", fetch_interval_secs());
     info!("Image    →  http://{bound}/dashboard.png");
     axum::serve(listener, app).await.expect("server error");
 }

@@ -292,17 +292,40 @@ fn draw_body(c: &mut Canvas, data: &DashData) {
     c.hline(col3_x, BODY_TOP + ROW_H as i32,     COL3_W, C::Black);
     c.hline(col3_x, BODY_TOP + ROW_H as i32 + 1, COL3_W, C::Black);
 
-    draw_weather(c, data, data.weather.as_ref());
-    draw_agenda(c, &data.agenda, &data.shipments_due_today);
-    draw_sys(c, &data.hosts, data.cluster.as_ref());
-    draw_budget(c, data.budget.as_ref());
-    draw_ops(c, &data.alerts);
+    // Freshness markers are resolved at render time, not fetch time, so the
+    // age they show is the age of the pixels the device is about to display.
+    let now = chrono::Utc::now();
+    let s = &data.status;
+    let (wx, ag, sys, bud, ops) = (
+        s.wx().marker(now),
+        s.agenda_panel().marker(now),
+        s.sys().marker(now),
+        s.budget_panel().marker(now),
+        s.ops().marker(now),
+    );
+
+    draw_weather(c, data, data.weather.as_ref(), wx.as_deref());
+    draw_agenda(c, &data.agenda, &data.shipments_due_today, ag.as_deref());
+    draw_sys(c, &data.hosts, data.cluster.as_ref(), sys.as_deref());
+    draw_budget(c, data.budget.as_ref(), bud.as_deref());
+    draw_ops(c, &data.alerts, ops.as_deref());
 }
 
 // ── Section header (the "stamp" with EN tag + // NN seq) ───────────────────
 
 /// Returns the y after the header (where panel content can start).
-fn draw_section_header(c: &mut Canvas, panel: Rect, en: &str, seq: &str) -> i32 {
+///
+/// `stale` replaces the sequence label with a red freshness tag (`STALE 12m`,
+/// `NO DATA`) when this panel's upstream is failing. It takes over the seq
+/// slot rather than sitting beside it: the "// NN" is decoration, and on a
+/// 220px column there isn't room for both.
+fn draw_section_header(
+    c: &mut Canvas,
+    panel: Rect,
+    en: &str,
+    seq: &str,
+    stale: Option<&str>,
+) -> i32 {
     let pad_x = 12;
     let top   = panel.y + 8;
 
@@ -320,16 +343,26 @@ fn draw_section_header(c: &mut Canvas, panel: Rect, en: &str, seq: &str) -> i32 
         Align::Left,
     );
 
-    // Sequence label, right-aligned
-    draw_text(
-        c,
-        &f_small(),
-        seq,
-        panel.right() - pad_x,
-        top + 11,
-        C::Black,
-        Align::Right,
-    );
+    match stale {
+        // Freshness tag, right-aligned: red fill + white text, mirroring the
+        // EN tag's shape so it reads as part of the stamp rather than content.
+        Some(marker) => {
+            let w = text_width(&f_small_bold(), marker) + 10;
+            let x = panel.right() - pad_x - w as i32;
+            c.fill_rect(Rect::new(x, top, w, tag_h), C::Red);
+            draw_text(c, &f_small_bold(), marker, x + 5, top + 11, C::White, Align::Left);
+        }
+        // Sequence label, right-aligned
+        None => draw_text(
+            c,
+            &f_small(),
+            seq,
+            panel.right() - pad_x,
+            top + 11,
+            C::Black,
+            Align::Right,
+        ),
+    }
 
     // 2px black underline
     let line_y = top + tag_h as i32 + 4;
@@ -358,9 +391,9 @@ fn draw_mail_icon_big(c: &mut Canvas, cx: i32, cy: i32, color: C) {
 
 // ── Weather panel ──────────────────────────────────────────────────────────
 
-fn draw_weather(c: &mut Canvas, data: &DashData, w: Option<&WeatherData>) {
+fn draw_weather(c: &mut Canvas, data: &DashData, w: Option<&WeatherData>, stale: Option<&str>) {
     let panel = col1_rect();
-    let content_y = draw_section_header(c, panel, "WX", "// 01");
+    let content_y = draw_section_header(c, panel, "WX", "// 01", stale);
 
     let Some(w) = w else {
         draw_text(c, &f_lg_bold(), "—", panel.x + 12, content_y + 32, C::Black, Align::Left);
@@ -639,9 +672,14 @@ fn draw_parcel_icon(c: &mut Canvas, cx: i32, cy: i32, color: C) {
 
 // ── Agenda panel ───────────────────────────────────────────────────────────
 
-fn draw_agenda(c: &mut Canvas, items: &[AgendaItem], shipments_due_today: &[ShipmentHighlight]) {
+fn draw_agenda(
+    c: &mut Canvas,
+    items: &[AgendaItem],
+    shipments_due_today: &[ShipmentHighlight],
+    stale: Option<&str>,
+) {
     let panel = col2_top();
-    let content_y = draw_section_header(c, panel, "AGENDA", "// 02");
+    let content_y = draw_section_header(c, panel, "AGENDA", "// 02", stale);
 
     let pad_x = 12;
     if items.is_empty() && shipments_due_today.is_empty() {
@@ -694,9 +732,9 @@ fn draw_agenda(c: &mut Canvas, items: &[AgendaItem], shipments_due_today: &[Ship
 
 // ── SYS panel ──────────────────────────────────────────────────────────────
 
-fn draw_sys(c: &mut Canvas, hosts: &[HostData], cluster: Option<&ClusterMetrics>) {
+fn draw_sys(c: &mut Canvas, hosts: &[HostData], cluster: Option<&ClusterMetrics>, stale: Option<&str>) {
     let panel = col2_bot();
-    let content_y = draw_section_header(c, panel, "SYS", "// 03");
+    let content_y = draw_section_header(c, panel, "SYS", "// 03", stale);
 
     if hosts.is_empty() && cluster.is_none() {
         draw_text(c, &f_small(), "PROMETHEUS_URL NOT SET", panel.x + 12, content_y + 18, C::Black, Align::Left);
@@ -799,9 +837,9 @@ fn draw_sys(c: &mut Canvas, hosts: &[HostData], cluster: Option<&ClusterMetrics>
 
 // ── Budget panel ───────────────────────────────────────────────────────────
 
-fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>) {
+fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>, stale: Option<&str>) {
     let panel = col3_top();
-    let content_y = draw_section_header(c, panel, "€", "// 04");
+    let content_y = draw_section_header(c, panel, "€", "// 04", stale);
 
     let Some(b) = b else {
         draw_text(c, &f_lg_bold(), "—", panel.x + 10, content_y + 24, C::Black, Align::Left);
@@ -1014,9 +1052,9 @@ fn clip_to_chars(s: &str, max_chars: usize) -> String {
 
 // ── OPS panel (tasks + alerts) ─────────────────────────────────────────────
 
-fn draw_ops(c: &mut Canvas, alerts: &[Alert]) {
+fn draw_ops(c: &mut Canvas, alerts: &[Alert], stale: Option<&str>) {
     let panel = col3_bot();
-    let content_y = draw_section_header(c, panel, "OPS", "// 05");
+    let content_y = draw_section_header(c, panel, "OPS", "// 05", stale);
 
     let pad_x = 10;
     let alert_h = 14i32;
@@ -1075,11 +1113,44 @@ fn draw_footer(c: &mut Canvas, data: &DashData) {
         C::White,
         Align::Left,
     );
+    // Status word: ONLINE only when every source answered on the last pull.
+    // Otherwise name the panels that are showing old data, so the degraded
+    // state is legible from across the room without auditing five headers.
+    let degraded = data.status.degraded(chrono::Utc::now());
+    // Status dot drawn as a primitive, not text: u8g2's Latin-extended fonts
+    // have no U+25CF, and a missing glyph makes render_aligned drop the whole
+    // string — which is how the old "● ONLINE" line came out blank.
+    let dot_x = 10 + 220;
+    c.fill_rect(Rect::new(dot_x, baseline - 6, 6, 6), C::Red);
+    let status_x = dot_x + 10;
+    let status_line = if degraded.is_empty() {
+        "ONLINE".to_string()
+    } else {
+        let panels = degraded
+            .iter()
+            .map(|(tag, marker)| format!("{tag} {marker}"))
+            .collect::<Vec<_>>()
+            .join("  ");
+        let detailed = format!("DEGRADED: {panels}");
+        // With every panel dark the detail list would run into "NEO / TRMNL";
+        // the per-panel headers carry the specifics anyway, so the footer
+        // degrades to a count rather than overprinting.
+        let avail = crate::render::W as i32
+            - 10
+            - text_width(&f_small_bold(), "NEO / TRMNL") as i32
+            - 12
+            - status_x;
+        if text_width(&f_small_bold(), &detailed) as i32 <= avail {
+            detailed
+        } else {
+            format!("DEGRADED: {} PANELS STALE", degraded.len())
+        }
+    };
     draw_text(
         c,
         &f_small_bold(),
-        "● ONLINE",
-        10 + 220,
+        &status_line,
+        status_x,
         baseline,
         C::Red,
         Align::Left,

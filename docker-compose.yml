@@ -10,10 +10,14 @@ services:
       # Must be reachable from the device — set to your LAN IP.
       BASE_URL: "http://192.168.1.100:8080"
 
-      # How often (seconds) to refetch upstream data and how often the
-      # firmware should poll. The PNG itself is rendered fresh on every
-      # device fetch. Default: 3600 = 1h.
+      # How often (seconds) the firmware should poll. The PNG itself is
+      # rendered fresh on every device fetch. Default: 3600 = 1h.
       REFRESH_SECS: "3600"
+
+      # How often (seconds) the background task refetches upstream data.
+      # Requests render from that cache and never fetch inline, so this is
+      # what decides how current the panel is. Default: 300 = 5m.
+      FETCH_INTERVAL_SECS: "300"
 
       LISTEN: "0.0.0.0:8080"
       RUST_LOG: "trmnl_cyberpunk=info"

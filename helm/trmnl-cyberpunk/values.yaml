@@ -79,10 +79,15 @@ readinessProbe:
 # from the device. Behind an Ingress with TLS, set this to the public URL.
 baseUrl: "http://trmnl-cyberpunk:8080"
 
-# How often (seconds) upstreams are refetched and how often the firmware
-# is asked to poll. The PNG itself is rendered fresh on every device
-# fetch — this knob does not control render frequency.
+# How often (seconds) the firmware is asked to poll. The PNG itself is
+# rendered fresh on every device fetch — this knob does not control render
+# frequency.
 refreshSecs: "3600"
+
+# How often (seconds) the background task refetches upstream data. Requests
+# always render from that cache, so this — not refreshSecs — is what decides
+# how current the panel is.
+fetchIntervalSecs: "300"
 
 # IANA timezone. Affects `chrono::Local::now()` clock display in the
 # header/footer.
