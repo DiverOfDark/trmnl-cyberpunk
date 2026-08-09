@@ -79,11 +79,15 @@ Upstream-specific env vars (leave blank to use the matching mock data) are docum
 
 The hero is **safe-to-spend per day**: what's left across the day-to-day envelopes divided by the days until payday. Payday is derived from when large inflows have actually landed over the last three months — a salary paid on the last working day is recognised as month-end rather than pinned to a date that drifts.
 
-Below it, six months of **spend bars each crossed by a tick at that month's income**. A bar poking above its tick means that month cost more than it earned, and it's drawn red. That crossing is the whole encoding — no legend needed — and it surfaces the thing a snapshot cannot: whether this is a normal month. The month in progress is drawn hollow and never reddened.
+Below it, **this month against the last three**, measured at the same day of the month so it's like for like. The bar plots the *ratio*: normal sits at a fixed mark and the fill runs past it. Plotting absolutes would put both near the left edge early in the month with a few pixels between them. Savings goals are excluded from both sides — money moved into a goal is allocation, not consumption, and one lumpy investment transfer would otherwise swamp the comparison. No figure is shown before the 3rd of the month, when the baseline is still one or two bills.
 
-`DUE` reports what's still to leave the account and names the largest unpaid bill. An unpaid rent dwarfs the discretionary pot, so a glance that misses it misreads the bank balance by thousands.
+This replaced a spent-vs-budget pace bar. Budgets tend to be set below what a category actually costs, so measuring against them mostly reported that the budget was wrong; measuring against recent behavior reports whether *this* month is different, which is the question worth a wall panel.
 
-At most three envelopes are flagged, and only for two reasons:
+Then **total capital** — on-budget cash plus off-budget holdings — over roughly twelve month-ends, read from Actual's `balancehistory` endpoint (one small request per account, no transaction arithmetic). Transfers between your own accounts cancel out by construction, so this line is immune to the accounting artifacts that distort income-vs-spend charts.
+
+It is a line, not bars, and deliberately so. The series sits in a narrow band far from zero. A bar encodes quantity as *length*, so it carries an implicit zero and truncating its axis lies — drawn honestly from zero, a 30% move compresses into the top quarter and every bar looks identical. A line encodes quantity as *position*, where a truncated axis is conventional and readable; the absolute value and the year delta are printed alongside so the missing baseline can't mislead. The final segment is dashed because the month in progress is pre-payday for most of its length, and that predictable dip shouldn't read as a real decline.
+
+At most two envelopes are flagged, and only for two reasons:
 
 - **OVER** — Actual's `balance` (carryover + budgeted − spent) is already negative, i.e. genuinely out of money. Using `balance` rather than `cap − spent` means an envelope that overshot this month but is still covered by accumulated funds isn't flagged.
 - **HOT** — spending is ≥40% above *this envelope's own* median spend by this same day-of-month over the prior three months, by at least €25, from the 4th of the month onward. Comparing an envelope to its own history catches a change in behavior; comparing it to a budget only catches an envelope that was set too low.

@@ -852,10 +852,7 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>, stale: Option<&str>) {
     let right = panel.right() - pad_x;
     let inner_w = (panel.w as i32 - pad_x * 2) as u32;
 
-    let now = chrono::Local::now();
-    let dim = days_in_month(now.year(), now.month());
-    let day = now.day();
-    let month_pct = if dim == 0 { 0.0 } else { day as f32 / dim as f32 };
+    let day = chrono::Local::now().day();
 
     // ── Roll the envelopes up by class ──
     //
@@ -878,17 +875,11 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>, stale: Option<&str>) {
     }
     let mut flags: Vec<Flag> = Vec::new();
     let mut disc_balance: i64 = 0;
-    let mut var_cap: u32 = 0;
-    let mut var_spent: u32 = 0;
-    let mut fixed_due: i64 = 0;
-    let mut fixed_top: Option<(&str, i64)> = None;
 
     for cat in &b.cats {
         match cat.class {
             BudgetClass::Variable => {
                 disc_balance += cat.balance as i64;
-                var_cap += cat.cap;
-                var_spent += cat.spent;
                 if cat.balance < 0 {
                     // `balance` folds in carryover, so a negative one means
                     // the envelope is genuinely out of money — hard flag.
@@ -897,16 +888,10 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>, stale: Option<&str>) {
                     flags.push(Flag { cat, over: false, pct });
                 }
             }
-            BudgetClass::Fixed => {
-                let due = (cat.cap as i64 - cat.spent as i64).max(0);
-                fixed_due += due;
-                if due > fixed_top.map_or(0, |(_, d)| d) {
-                    fixed_top = Some((cat.label.as_str(), due));
-                }
-            }
-            // Savings goals are money deliberately parked; they neither count
-            // as spendable nor as a debit still to come.
-            BudgetClass::Savings => {}
+            // Fixed bills are committed and already enveloped — no decision
+            // follows from restating them. Savings goals are money
+            // deliberately parked. Neither belongs in the discretionary pot.
+            BudgetClass::Fixed | BudgetClass::Savings => {}
         }
     }
     // Out-of-money first (deepest), then furthest above normal.
@@ -936,46 +921,65 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>, stale: Option<&str>) {
     };
     draw_text(c, &f_small(), &sub, left, content_y + 36, C::Black, Align::Left);
 
-    // ── Discretionary pace bar (spent vs cap of Variable envelopes) ──
-    // Color encodes pace: red over budget, yellow ahead of the calendar,
-    // green on/under pace.
-    let bar = Rect::new(left, content_y + 42, inner_w, 6);
-    c.stroke_rect(bar, 1, C::Black);
-    if var_cap > 0 {
-        let ratio = var_spent as f32 / var_cap as f32;
-        let fill_color = if var_spent > var_cap {
-            C::Red
-        } else if ratio > month_pct {
-            C::Yellow
-        } else {
-            C::Green
-        };
-        if let Some(fill_w) = (bar.w.saturating_sub(2) * var_spent.min(var_cap)).checked_div(var_cap) {
-            c.fill_rect(Rect::new(bar.x + 1, bar.y + 1, fill_w, 4), fill_color);
-        }
-    }
-
-    // ── Income vs spend, last six months ──
-    let mut y = content_y + 54;
-    if !b.history.is_empty() {
-        draw_trend(c, left, y, inner_w, &b.history);
-        y += TREND_H;
-    }
-
-    // ── What's still going to leave the account ──
+    // ── This month against the last three ──
     //
-    // Promoted out of the old footnote: an unpaid rent dwarfs the
-    // discretionary pot, and a glance that misses it misreads the bank
-    // balance by thousands.
-    let due_line = match (fixed_due, fixed_top) {
-        (0, _) => "DUE  ALL BILLS PAID".to_string(),
-        (total, Some((label, top))) => {
-            format!("DUE  €{total} · {} {top}", clip_to_chars(label, 8))
+    // Replaces a spent-vs-budget pace bar. These budgets are routinely set
+    // below what a category actually costs, so measuring against them mostly
+    // reported that the budget was wrong. Measuring against recent behavior
+    // answers the question a wall panel is for: is *this* month different?
+    let mut y = content_y + 44;
+    match b.vs_normal() {
+        Some(pct) => {
+            let txt = format!("{pct:+}%");
+            let color = if pct >= 15 {
+                C::Red
+            } else if pct <= -15 {
+                C::Green
+            } else {
+                C::Black
+            };
+            draw_text(c, &f_xl_bold(), &txt, left, y + 14, color, Align::Left);
+            draw_text(c, &f_small(), "VS NORMAL 3MO", right, y + 14, C::Black, Align::Right);
+
+            // The bar plots the *ratio*: normal sits at a fixed mark and the
+            // fill runs past it. Plotting absolutes would put both near the
+            // left edge early in the month with a few pixels between them.
+            let bar = Rect::new(left, y + 19, inner_w, 7);
+            c.stroke_rect(bar, 1, C::Black);
+            let track = bar.w.saturating_sub(2);
+            let mark = track * 55 / 100;
+            let fill = ((mark as i64 * (100 + pct as i64) / 100).max(0) as u32).min(track);
+            c.fill_rect(Rect::new(bar.x + 1, bar.y + 1, fill, 5), color);
+            // Normal marker drawn last so the fill never hides it.
+            c.vline(bar.x + 1 + mark as i32, bar.y - 2, 11, C::Black);
+            y += 34;
         }
-        (total, None) => format!("DUE  €{total}"),
-    };
-    draw_text(c, &f_small(), &due_line, left, y + 12, C::Black, Align::Left);
-    y += 20;
+        None => {
+            draw_text(c, &f_small(), "NO BASELINE YET", left, y + 10, C::Black, Align::Left);
+            y += 18;
+        }
+    }
+
+    // ── Total capital, ~12 months ──
+    if !b.capital.is_empty() {
+        let total = b.capital_total();
+        draw_text(c, &f_small_bold(), &format!("CAPITAL {}", short_eur(total)), left, y + 8, C::Black, Align::Left);
+        if let Some(first) = b.capital.first() {
+            let delta = total - first.total;
+            let sign = if delta < 0 { "-" } else { "+" };
+            draw_text(
+                c,
+                &f_small(),
+                &format!("{sign}{}/YR", short_eur(delta.abs())),
+                right,
+                y + 8,
+                if delta < 0 { C::Red } else { C::Black },
+                Align::Right,
+            );
+        }
+        draw_capital(c, left, y + 12, inner_w, &b.capital);
+        y += 12 + CAPITAL_H + 4;
+    }
 
     // ── Flagged envelopes: at most two, so the panel stays scannable ──
     let row_h = 13i32;
@@ -1002,85 +1006,58 @@ fn draw_budget(c: &mut Canvas, b: Option<&BudgetData>, stale: Option<&str>) {
         y += row_h;
     }
 
-    // ── Footer context: the pot behind the hero, and the cash behind it all ──
-    let left_txt = if disc_balance >= 0 {
-        format!("LEFT €{disc_balance}")
-    } else {
-        format!("OVER €{}", -disc_balance)
-    };
-    draw_text(c, &f_small(), &left_txt, left, footer_y, C::Black, Align::Left);
-    if b.cash != 0 {
-        draw_text(c, &f_small(), &format!("CASH {}", short_eur(b.cash)), right, footer_y, C::Black, Align::Right);
+    // ── Footer: how much of the capital is spendable cash ──
+    // A slow-moving fact, but the one number the capital line hides: all of
+    // last year's growth went into holdings while cash stayed flat.
+    if b.capital_total() != 0 {
+        draw_text(
+            c,
+            &f_small(),
+            &format!("CASH {} OF {}", short_eur(b.cash), short_eur(b.capital_total())),
+            left,
+            footer_y,
+            C::Black,
+            Align::Left,
+        );
     }
 }
 
-/// Total height of the trend strip.
-const TREND_H: i32 = 34;
+/// Height of the capital chart's plot area.
+const CAPITAL_H: i32 = 26;
 
-/// Six months of spend as bars, each crossed by a tick at that month's income.
+/// Total capital over ~12 month-ends, as a line on a truncated axis.
 ///
-/// Encoding spend-vs-income as a *crossing* rather than two rows of bars is
-/// what makes this legible at 26px: a bar poking above its own income tick
-/// means that month cost more than it earned, and no legend is needed to see
-/// it. Since income is usually near-constant the ticks line up into a visual
-/// rule, so the eye reads a single threshold. The month still in progress is
-/// drawn hollow and never reddened — it hasn't finished losing yet.
-fn draw_trend(c: &mut Canvas, x: i32, y: i32, w: u32, months: &[BudgetMonth]) {
-    let show: Vec<&BudgetMonth> = months.iter().rev().take(6).rev().collect();
-    let scale = show
-        .iter()
-        .map(|m| m.income.max(m.spent))
-        .max()
-        .unwrap_or(0)
-        .max(1);
-
-    let bar_w = 9u32;
-    let gap = 4i32;
-    let max_h = 24u32;
-    let base = y + 26;
-    let h_of = |v: u32| ((v as u64 * max_h as u64 / scale as u64) as u32).max(1);
-
-    for (i, m) in show.iter().enumerate() {
-        let bx = x + i as i32 * (bar_w as i32 + gap);
-        let sh = h_of(m.spent);
-        let bar = Rect::new(bx, base - sh as i32, bar_w, sh);
-        let over = m.spent > m.income && !m.partial;
-        if m.partial {
-            c.stroke_rect(bar, 1, C::Black);
-        } else {
-            c.fill_rect(bar, if over { C::Red } else { C::Black });
-        }
-        // Income tick, drawn 2px proud of the bar on each side so it reads as
-        // a threshold the bar crosses rather than part of the bar.
-        if m.income > 0 {
-            let ih = h_of(m.income);
-            c.hline(bx - 2, base - ih as i32, bar_w + 4, C::Black);
-        }
-    }
-    // Floor rule, so short bars still have something to stand on.
-    c.hline(x, base + 2, 6 * (bar_w + gap as u32), C::Black);
-
-    // Annotations: the income line's value, and the worst month of the run —
-    // the number the whole strip exists to surface.
-    let complete: Vec<&&BudgetMonth> = show.iter().filter(|m| !m.partial).collect();
-    if complete.is_empty() {
+/// A line, not bars, and deliberately so: this series sits in a narrow band
+/// far from zero (€38K-€49K here). A bar encodes quantity as *length*, so it
+/// carries an implicit zero and truncating its axis lies — drawn honestly from
+/// zero, a 30% move compresses into the top quarter and every bar looks the
+/// same. A line encodes quantity as *position*, where a truncated axis is
+/// conventional and readable. The absolute value and the year delta are
+/// printed alongside so the missing baseline can't mislead.
+fn draw_capital(c: &mut Canvas, x: i32, y: i32, w: u32, points: &[CapitalPoint]) {
+    if points.len() < 2 {
         return;
     }
-    let avg: u32 =
-        (complete.iter().map(|m| m.income as u64).sum::<u64>() / complete.len() as u64) as u32;
-    draw_text(c, &f_small(), &format!("{}/MO IN", short_eur(avg as i64)), x + w as i32, y + 12, C::Black, Align::Right);
+    let lo = points.iter().map(|p| p.total).min().unwrap_or(0);
+    let hi = points.iter().map(|p| p.total).max().unwrap_or(0);
+    let span = (hi - lo).max(1);
+    let step = (w as i32 - 2) / (points.len() as i32 - 1);
+    let px = |i: usize| x + 1 + i as i32 * step;
+    // 1px inset top and bottom so the extremes aren't clipped by the frame.
+    let py = |v: i64| y + CAPITAL_H - 2 - ((v - lo) * (CAPITAL_H as i64 - 4) / span) as i32;
 
-    let worst = complete
-        .iter()
-        .min_by_key(|m| m.income as i64 - m.spent as i64)
-        .unwrap();
-    let net = worst.income as i64 - worst.spent as i64;
-    let (txt, color) = if net < 0 {
-        (format!("{} -{}", worst.label, -net), C::Red)
-    } else {
-        (format!("{} +{net}", worst.label), C::Black)
-    };
-    draw_text(c, &f_small(), &txt, x + w as i32, y + 26, color, Align::Right);
+    for i in 0..points.len() - 1 {
+        // The final segment ends in the month still running, whose balance is
+        // pre-payday for most of the month — dashed so that predictable dip
+        // doesn't read as a real decline.
+        let dash = points[i + 1].provisional;
+        c.line(px(i), py(points[i].total), px(i + 1), py(points[i + 1].total), C::Black, dash);
+    }
+
+    // Endpoint markers: where the year started, and where it stands now.
+    let last = points.len() - 1;
+    c.fill_rect(Rect::new(px(0) - 1, py(points[0].total) - 1, 3, 3), C::Black);
+    c.fill_rect(Rect::new(px(last) - 1, py(points[last].total) - 1, 3, 3), C::Red);
 }
 
 /// Euro amount shortened for the tight footer/annotation slots: `€18.6K`

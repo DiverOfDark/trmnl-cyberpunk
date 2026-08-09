@@ -145,6 +145,36 @@ impl Canvas {
         self.fill_rect(Rect { x, y, w: 1, h }, c);
     }
 
+    /// One-pixel Bresenham line. The panel is an indexed framebuffer written
+    /// pixel-exact — no antialiasing, no dithering — so a 1px stroke stays a
+    /// crisp 1px stroke and needs no thickening to survive.
+    ///
+    /// `dash` draws only every other pixel, which is how a provisional series
+    /// distinguishes itself from a settled one without spending a colour.
+    pub fn line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, c: C, dash: bool) {
+        let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
+        let (sx, sy) = (if x0 < x1 { 1 } else { -1 }, if y0 < y1 { 1 } else { -1 });
+        let (mut x, mut y, mut err, mut n) = (x0, y0, dx + dy, 0u32);
+        loop {
+            if !dash || n % 2 == 0 {
+                self.put(x, y, c);
+            }
+            n += 1;
+            if x == x1 && y == y1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+
     /// Filled left-leaning parallelogram: top edge from (x,y) to (x+w,y),
     /// bottom edge offset by `slant` to the left. Used for the TRMNL-01 tab.
     pub fn fill_left_parallelogram(&mut self, x: i32, y: i32, w: u32, h: u32, slant: u32, c: C) {

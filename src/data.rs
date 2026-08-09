@@ -277,6 +277,29 @@ pub fn days_in_month(year: i32, month: u32) -> u32 {
     }
 }
 
+impl BudgetData {
+    /// How this month's spending compares with the last three, measured at
+    /// the same day of the month so it's like for like. `None` until there's
+    /// a usable baseline.
+    ///
+    /// This replaced a spent-vs-budget pace bar. Budgets here are routinely
+    /// set below what a category actually costs, so measuring against them
+    /// mostly reported that the budget was wrong; measuring against recent
+    /// behavior reports whether *this month* is different, which is the
+    /// question worth a wall panel.
+    pub fn vs_normal(&self) -> Option<i32> {
+        let typical = self.typical_mtd?;
+        (typical > 0).then(|| {
+            ((self.mtd_spend as i64 - typical as i64) * 100 / typical as i64) as i32
+        })
+    }
+
+    /// Cash plus holdings.
+    pub fn capital_total(&self) -> i64 {
+        self.cash + self.invested
+    }
+}
+
 impl BudgetCat {
     /// How far above this envelope's own normal it is running, as a percent,
     /// when that gap is worth flagging. `None` means "nothing to say" — which
@@ -297,16 +320,18 @@ impl BudgetCat {
     }
 }
 
-/// One month of the income-vs-spend trend strip.
+/// One month-end sample of total capital (on-budget cash + off-budget
+/// holdings) for the trend line.
 #[derive(Clone, Serialize)]
-pub struct BudgetMonth {
+pub struct CapitalPoint {
     /// Three-letter month name, e.g. `JUL`.
     pub label: String,
-    pub income: u32,
-    pub spent: u32,
-    /// True for the month still in progress — its bars are drawn hollow so a
-    /// half-finished month isn't read as a spending collapse.
-    pub partial: bool,
+    /// Cash plus holdings at that month end, in euros.
+    pub total: i64,
+    /// True for the month still in progress. Its balance is pre-payday for
+    /// most of the month, so the last point always dips and recovers — drawn
+    /// dashed so that dip doesn't read as a real decline.
+    pub provisional: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -315,11 +340,24 @@ pub struct BudgetData {
     pub spent: u32,
     pub cap: u32,
     pub cats: Vec<BudgetCat>,
-    /// Income vs spend for the last six months, oldest first, current month
-    /// last. Empty when the history fetch failed — the panel drops the trend
-    /// strip rather than the whole section.
+    /// Month-end total capital for the last ~12 months, oldest first. Empty
+    /// when the history fetch failed — the panel drops the chart rather than
+    /// the whole section.
     #[serde(default)]
-    pub history: Vec<BudgetMonth>,
+    pub capital: Vec<CapitalPoint>,
+    /// Spend so far this month across everything except savings goals, in
+    /// euros. Money moved into a goal is allocation, not consumption, and
+    /// counting it makes an investment month look like a spending disaster.
+    #[serde(default)]
+    pub mtd_spend: u32,
+    /// Median spend by this same day-of-month over the prior three months,
+    /// on the same basis as `mtd_spend`. `None` in the first days of a month,
+    /// when the baseline is one or two bills and the ratio is meaningless.
+    #[serde(default)]
+    pub typical_mtd: Option<u32>,
+    /// Off-budget holdings (investment accounts), in euros.
+    #[serde(default)]
+    pub invested: i64,
     /// Days until the next expected payday, derived from when large inflows
     /// have historically landed. Falls back to days remaining in the month.
     #[serde(default)]
@@ -551,19 +589,27 @@ impl DashData {
                     BudgetCat { label: "Misc".into(),      spent:  46, cap: 420, balance:  374, txns:  3, typical_to_date: Some( 60), class: BudgetClass::Variable },
                     BudgetCat { label: "Vacation".into(),  spent:   0, cap: 300, balance: 1800, txns:  0, typical_to_date: None,      class: BudgetClass::Savings  },
                 ],
-                // Six months where two ran spend over income — the trend strip
-                // should paint those two bars red. Last entry is the month in
-                // progress and renders hollow.
-                history: vec![
-                    BudgetMonth { label: "MAR".into(), income: 7696, spent: 11738, partial: false },
-                    BudgetMonth { label: "APR".into(), income: 6918, spent:  6692, partial: false },
-                    BudgetMonth { label: "MAY".into(), income: 6918, spent:  7337, partial: false },
-                    BudgetMonth { label: "JUN".into(), income: 6928, spent:  6783, partial: false },
-                    BudgetMonth { label: "JUL".into(), income: 6921, spent:  7975, partial: false },
-                    BudgetMonth { label: "AUG".into(), income:    0, spent:  2686, partial: true  },
-                ],
+                // A year of capital with a step up, a plateau, and a
+                // provisional final point — enough shape to prove the line
+                // chart's truncated axis and its dashed tail.
+                capital: [
+                    ("SEP", 39171), ("OCT", 39660), ("NOV", 37919), ("DEC", 38454),
+                    ("JAN", 41056), ("FEB", 46678), ("MAR", 47642), ("APR", 47869),
+                    ("MAY", 49189), ("JUN", 49335), ("JUL", 48281), ("AUG", 47295),
+                ]
+                .iter()
+                .enumerate()
+                .map(|(i, (label, total))| CapitalPoint {
+                    label: (*label).into(),
+                    total: *total,
+                    provisional: i == 11,
+                })
+                .collect(),
+                mtd_spend: 3186,
+                typical_mtd: Some(2655),
                 days_to_payday: 22,
                 cash: 18581,
+                invested: 28714,
             }),
             alerts: vec![
                 Alert { level: "WRN".into(), time: "14:02".into(), message: "muspelheimr cpu_temp 71C > 65".into() },
@@ -619,6 +665,43 @@ mod tests {
     fn no_pace_flags_in_the_first_days() {
         assert_eq!(cat(494, Some(316)).hot_pct(3), None);
         assert_eq!(cat(494, Some(316)).hot_pct(4), Some(56));
+    }
+
+    fn budget(mtd: u32, typical: Option<u32>) -> BudgetData {
+        BudgetData {
+            month_label: "AUG '26".into(),
+            spent: 0,
+            cap: 0,
+            cats: Vec::new(),
+            capital: Vec::new(),
+            mtd_spend: mtd,
+            typical_mtd: typical,
+            days_to_payday: 22,
+            cash: 18581,
+            invested: 28714,
+        }
+    }
+
+    /// The whole-budget comparison the panel leads with. Real figures from
+    /// 2026-08-09: €3,186 spent by day 9 against a €2,655 three-month norm.
+    #[test]
+    fn month_compares_against_its_own_norm() {
+        assert_eq!(budget(3186, Some(2655)).vs_normal(), Some(20));
+        assert_eq!(budget(2655, Some(2655)).vs_normal(), Some(0));
+        assert_eq!(budget(1900, Some(2655)).vs_normal(), Some(-28));
+    }
+
+    /// Without a baseline the panel says nothing rather than guessing.
+    #[test]
+    fn no_baseline_means_no_comparison() {
+        assert_eq!(budget(3186, None).vs_normal(), None);
+        assert_eq!(budget(3186, Some(0)).vs_normal(), None);
+    }
+
+    /// Capital is cash plus holdings, which is what the trend line plots.
+    #[test]
+    fn capital_is_cash_plus_holdings() {
+        assert_eq!(budget(0, None).capital_total(), 47295);
     }
 
     /// No baseline → no claim. An envelope we've never seen before is not

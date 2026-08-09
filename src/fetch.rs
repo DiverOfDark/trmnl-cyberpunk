@@ -960,7 +960,7 @@ impl Sources {
             "{}/budgets/{}/months/{}",
             self.actualbudget_url, self.actualbudget_sync_id, month,
         );
-        let (month_r, history_r, trend) = tokio::join!(
+        let (month_r, history_r, capital_r) = tokio::join!(
             get_json(
                 &self.client,
                 &month_url,
@@ -968,12 +968,16 @@ impl Sources {
                 &self.actualbudget_password
             ),
             self.spend_history(today),
-            self.month_history(today),
+            self.capital_history(today),
         );
         let month_data: Value = month_r?;
         let hist = history_r.unwrap_or_else(|e| {
             warn!("budget spend history unavailable ({e:#}); pace flags and payday disabled");
             SpendHistory::default()
+        });
+        let (capital, invested) = capital_r.unwrap_or_else(|e| {
+            warn!("capital history unavailable ({e:#}); trend line hidden");
+            (Vec::new(), 0)
         });
 
         let cats_raw = month_data["data"]["categoryGroups"]
@@ -982,6 +986,7 @@ impl Sources {
             .unwrap_or_default();
 
         let mut cats: Vec<BudgetCat> = Vec::new();
+        let mut class_of: HashMap<String, BudgetClass> = HashMap::new();
         let mut total_spent: u32 = 0;
         let mut total_cap: u32 = 0;
 
@@ -1019,6 +1024,7 @@ impl Sources {
                         } else {
                             BudgetClass::Variable
                         });
+                        class_of.insert(id.to_string(), class);
                         cats.push(BudgetCat {
                             label: name.to_string(),
                             spent,
@@ -1047,75 +1053,142 @@ impl Sources {
             &now.format("%Y").to_string()[2..]
         );
 
-        // Trend strip: the five prior months plus the one in progress. The
-        // current month's own totals come from the aggregate we already have,
-        // so it costs no extra request.
-        let d = &month_data["data"];
-        let eur = |v: &Value| (v.as_f64().unwrap_or(0.0).abs() / 100.0).round() as u32;
-        let mut history = trend;
-        history.push(BudgetMonth {
-            label: months[(now.month() - 1) as usize].to_string(),
-            income: eur(&d["totalIncome"]),
-            spent: eur(&d["totalSpent"]),
-            partial: true,
-        });
+        // Whole-budget spend by today's day-of-month, per month, with savings
+        // goals left out — money moved into a goal is allocation, not
+        // consumption, and one lumpy investment transfer would otherwise
+        // swamp the comparison.
+        let mut by_month: HashMap<u32, u64> = HashMap::new();
+        for ((cat, key), cents) in &hist.to_date {
+            if class_of.get(cat) == Some(&BudgetClass::Savings) {
+                continue;
+            }
+            *by_month.entry(*key).or_insert(0) += cents;
+        }
+        let to_eur = |cents: u64| ((cents as f64) / 100.0).round() as u32;
+        let this_key = today.year() as u32 * 12 + today.month();
+        let mtd_spend = by_month.get(&this_key).copied().map(to_eur).unwrap_or(0);
+        let mut prior: Vec<u32> = (1..=3)
+            .filter_map(|n| by_month.get(&(this_key - n)).copied())
+            .map(to_eur)
+            .collect();
+        prior.sort_unstable();
+        // Before the 3rd the baseline is a bill or two and the ratio swings
+        // by hundreds of percent; measured on this budget it only settles
+        // from day 3 onward.
+        let typical_mtd = (prior.len() >= 2 && today.day() >= 3).then(|| prior[prior.len() / 2]);
 
+        let d = &month_data["data"];
         Ok(BudgetData {
             month_label,
             spent: total_spent,
             cap: total_cap,
             cats,
-            history,
+            capital,
+            mtd_spend,
+            typical_mtd,
             days_to_payday: days_to_payday(today, hist.payday),
             // `totalBalance` is every envelope balance summed, which for an
             // on-budget file is exactly the cash backing it.
             cash: (d["totalBalance"].as_f64().unwrap_or(0.0) / 100.0).round() as i64,
+            invested,
         })
     }
 
-    /// Income and spend totals for the five months preceding `today`, oldest
-    /// first. Individual months that fail are dropped rather than failing the
-    /// budget — a short trend strip beats no budget panel.
-    async fn month_history(&self, today: NaiveDate) -> Vec<BudgetMonth> {
-        const MONTHS: [&str; 12] = [
+    /// Month-end total capital for the last `MONTHS` months, plus today.
+    ///
+    /// Actual's `balancehistory` endpoint returns a date→balance map per
+    /// account, so one small request per account replaces walking a year of
+    /// transactions (~60 KB against ~530 KB) and needs no reconstruction
+    /// arithmetic — the balances are what Actual itself reports.
+    ///
+    /// Returns `(points, off_budget_total)`. Off-budget accounts are holdings
+    /// rather than spendable cash; both go into the capital line, but the
+    /// panel reports them separately.
+    async fn capital_history(&self, today: NaiveDate) -> Result<(Vec<CapitalPoint>, i64)> {
+        const MONTHS: u32 = 11;
+        const NAMES: [&str; 12] = [
             "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
         ];
-        let wanted: Vec<NaiveDate> = (1..=5).rev().filter_map(|n| months_before(today, n)).collect();
+        let since = months_before(today, MONTHS).unwrap_or(today);
 
-        let fetched = futures::future::join_all(wanted.iter().map(|d| {
+        let accounts: Value = get_json(
+            &self.client,
+            &format!(
+                "{}/budgets/{}/accounts",
+                self.actualbudget_url, self.actualbudget_sync_id
+            ),
+            &self.actualbudget_key,
+            &self.actualbudget_password,
+        )
+        .await?;
+        let accounts = accounts["data"].as_array().cloned().unwrap_or_default();
+
+        let histories = futures::future::join_all(accounts.iter().filter_map(|a| {
+            let id = a["id"].as_str()?.to_string();
+            let offbudget = a["offbudget"].as_bool().unwrap_or(false);
             let url = format!(
-                "{}/budgets/{}/months/{}-{:02}",
+                "{}/budgets/{}/accounts/{}/balancehistory?since_date={}",
                 self.actualbudget_url,
                 self.actualbudget_sync_id,
-                d.year(),
-                d.month(),
+                id,
+                since.format("%Y-%m-%d"),
             );
-            async move {
-                get_json(
+            Some(async move {
+                let v: Value = get_json(
                     &self.client,
                     &url,
                     &self.actualbudget_key,
                     &self.actualbudget_password,
                 )
                 .await
-            }
+                .ok()?;
+                Some((offbudget, v))
+            })
         }))
         .await;
 
-        wanted
-            .iter()
-            .zip(fetched)
-            .filter_map(|(d, r)| {
-                let v: Value = r.ok()?;
-                let eur = |x: &Value| (x.as_f64().unwrap_or(0.0).abs() / 100.0).round() as u32;
-                Some(BudgetMonth {
-                    label: MONTHS[(d.month() - 1) as usize].to_string(),
-                    income: eur(&v["data"]["totalIncome"]),
-                    spent: eur(&v["data"]["totalSpent"]),
-                    partial: false,
-                })
-            })
-            .collect()
+        // Sum every account's balance per calendar day. A closed account
+        // simply contributes zeros.
+        let mut per_day: HashMap<String, i64> = HashMap::new();
+        let mut off_today: i64 = 0;
+        let today_key = today.format("%Y-%m-%d").to_string();
+        for (offbudget, v) in histories.into_iter().flatten() {
+            let Some(map) = v["data"].as_object() else {
+                continue;
+            };
+            for (day, cents) in map {
+                let Some(cents) = cents.as_i64() else { continue };
+                *per_day.entry(day.clone()).or_insert(0) += cents;
+                if offbudget && day == &today_key {
+                    off_today += cents;
+                }
+            }
+        }
+        if per_day.is_empty() {
+            return Err(anyhow!("balance history empty"));
+        }
+
+        // Sample each month end, then today for the month still running.
+        let mut points = Vec::new();
+        for n in (0..=MONTHS).rev() {
+            let Some(m) = months_before(today, n) else {
+                continue;
+            };
+            let last = month_end(m);
+            let (key, provisional) = if last >= today {
+                (today_key.clone(), true)
+            } else {
+                (last.format("%Y-%m-%d").to_string(), false)
+            };
+            if let Some(cents) = per_day.get(&key) {
+                points.push(CapitalPoint {
+                    label: NAMES[(m.month() - 1) as usize].to_string(),
+                    total: ((*cents as f64) / 100.0).round() as i64,
+                    provisional,
+                });
+            }
+        }
+        Ok((points, ((off_today as f64) / 100.0).round() as i64))
     }
 
     /// One pass over the last four months of transactions, yielding every
@@ -1179,7 +1252,7 @@ impl Sources {
         // month's total. Accumulated in cents and rounded once at the end;
         // rounding each transaction first loses up to €1 apiece, which across
         // a busy envelope shifts the baseline enough to move the percentage.
-        let mut to_date: HashMap<(String, u32), u64> = HashMap::new();
+
         // Largest inflow seen in each month, and the day it landed.
         let mut top_inflow: HashMap<u32, (i64, u32)> = HashMap::new();
 
@@ -1207,7 +1280,7 @@ impl Sources {
                 *out.counts.entry(cat.to_string()).or_insert(0) += 1;
             }
             if date.day() <= today.day() {
-                *to_date.entry((cat.to_string(), key)).or_insert(0) += amount.unsigned_abs();
+                *out.to_date.entry((cat.to_string(), key)).or_insert(0) += amount.unsigned_abs();
             }
         }
 
@@ -1217,13 +1290,13 @@ impl Sources {
         // as a €0 baseline would flag every returning category as abnormal.
         let this_key = today.year() as u32 * 12 + today.month();
         let prior: Vec<u32> = (1..=3).map(|n| this_key - n).collect();
-        let mut cats: Vec<String> = to_date.keys().map(|(c, _)| c.clone()).collect();
+        let mut cats: Vec<String> = out.to_date.keys().map(|(c, _)| c.clone()).collect();
         cats.sort();
         cats.dedup();
         for cat in cats {
             let mut seen: Vec<u32> = prior
                 .iter()
-                .filter_map(|k| to_date.get(&(cat.clone(), *k)).copied())
+                .filter_map(|k| out.to_date.get(&(cat.clone(), *k)).copied())
                 .map(|cents| ((cents as f64) / 100.0).round() as u32)
                 .collect();
             if seen.len() < 2 {
@@ -1267,8 +1340,18 @@ struct SpendHistory {
     counts: HashMap<String, u32>,
     /// category id → typical spend by this day-of-month (euros).
     typical: HashMap<String, u32>,
+    /// (category id, month key) → spend up to today's day-of-month, in cents.
+    /// Re-aggregated by the caller, which knows each category's class and can
+    /// leave savings out of the whole-budget comparison.
+    to_date: HashMap<(String, u32), u64>,
     /// Day of month large inflows land on, or [`MONTH_END`].
     payday: Option<u32>,
+}
+
+/// Last day of the month `d` falls in.
+fn month_end(d: NaiveDate) -> NaiveDate {
+    NaiveDate::from_ymd_opt(d.year(), d.month(), days_in_month(d.year(), d.month()))
+        .unwrap_or(d)
 }
 
 /// `today` shifted back `n` whole months, clamped to the 1st so month lengths
@@ -1739,9 +1822,12 @@ mod tests {
             spent,
             cap,
             cats: Vec::new(),
-            history: Vec::new(),
+            capital: Vec::new(),
+            mtd_spend: 0,
+            typical_mtd: None,
             days_to_payday: 0,
             cash: 0,
+            invested: 0,
         }
     }
 
