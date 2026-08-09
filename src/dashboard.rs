@@ -415,104 +415,97 @@ fn draw_weather(c: &mut Canvas, data: &DashData, w: Option<&WeatherData>, stale:
     let deg_cy = content_y + 30;
     draw_circle_outline(c, deg_cx, deg_cy, deg_r, 2, C::Red);
 
-    // Side info (condition + HI/LO + next hourly slots).
+    // Side info beside the digits: today's headline only. The hourly slots
+    // used to live here too, but six of them don't fit a ~100px column
+    // without running into the hero icon below.
     let side_x = deg_cx + deg_r + 12;
     let side_avail = panel.right() - 12 - side_x;
-    if side_avail >= 70 {
-        draw_text(c, &f_body_bold(), &w.condition, side_x, content_y + 40, C::Black, Align::Left);
-        draw_text(
-            c,
-            &f_small(),
-            &format!("HI {}°  LO {}°", w.hi, w.lo),
-            side_x,
-            content_y + 56,
-            C::Black,
-            Align::Left,
-        );
-        for (i, hour) in w.hourly.iter().take(3).enumerate() {
-            draw_text(
-                c,
-                &f_small(),
-                &format!("{} {}° {}", hour.time, hour.temp_c, hour.cond),
-                side_x,
-                content_y + 72 + (i as i32) * 14,
-                C::Black,
-                Align::Left,
-            );
-        }
+    let (cond_x, cond_y) = if side_avail >= 70 {
+        (side_x, content_y + 40)
     } else {
-        draw_text(c, &f_body_bold(), &w.condition, temp_x, content_y + 122, C::Black, Align::Left);
-        draw_text(
-            c,
-            &f_small(),
-            &format!("HI {}°  LO {}°", w.hi, w.lo),
-            temp_x,
-            content_y + 138,
-            C::Black,
-            Align::Left,
-        );
-        for (i, hour) in w.hourly.iter().take(3).enumerate() {
-            draw_text(
-                c,
-                &f_small(),
-                &format!("{} {}° {}", hour.time, hour.temp_c, hour.cond),
-                temp_x,
-                content_y + 154 + (i as i32) * 14,
-                C::Black,
-                Align::Left,
-            );
+        (temp_x, content_y + 122)
+    };
+    draw_text(c, &f_body_bold(), &w.condition, cond_x, cond_y, C::Black, Align::Left);
+    draw_text(
+        c,
+        &f_small(),
+        &format!("HI {}°  LO {}°", w.hi, w.lo),
+        cond_x,
+        cond_y + 16,
+        C::Black,
+        Align::Left,
+    );
+
+    // ── Next hours, as a column-per-hour strip ──
+    // Horizontal beats a stacked list here: six rows of "18:00 14° CLOUD"
+    // is a paragraph, six narrow columns is a shape you read the trend off.
+    let hours: Vec<&WeatherHour> = w.hourly.iter().take(6).collect();
+    let hr_y = temp_baseline + 12;
+    if !hours.is_empty() {
+        let cell_w = (panel.w - 24) / 6;
+        for (i, h) in hours.iter().enumerate() {
+            let cx = panel.x + 12 + (cell_w * i as u32) as i32 + cell_w as i32 / 2;
+            // Hour only — the ":00" is the same on every column and the
+            // strip is only six hours wide, so it carries no information.
+            let hh = h.time.split(':').next().unwrap_or(&h.time);
+            draw_text(c, &f_small(), hh, cx, hr_y + 9, C::Black, Align::Center);
+            draw_text(c, &f_body_bold(), &format!("{}°", h.temp_c), cx, hr_y + 25, C::Black, Align::Center);
+            draw_weather_icon(c, cx, hr_y + 36, 15, &h.cond, C::Black);
         }
+        c.hline(panel.x + 12, hr_y + 44, panel.w - 24, C::Black);
     }
 
-    // Forecast: 4-column grid pinned to bottom of panel.
-    let fc_h = 48u32;
+    // ── Forecast: eight days as two rows of four, pinned to the bottom ──
+    // Eight across a 260px panel gives 29px a cell, too narrow for the hi
+    // temperature at a readable size; two rows keep the cell design intact.
+    let fc_row_h = 46u32;
+    let fc_rows = 2u32;
+    let fc_h = fc_row_h * fc_rows;
     let fc_y = panel.bottom() - fc_h as i32 - 6;
     c.hline(panel.x + 12, fc_y, panel.w - 24, C::Black);
 
-    // Big condition icon centred in the empty band between the temp digits
-    // and the forecast grid. Prefer the nearest upcoming hourly slot so the
-    // hero visual reflects what is about to happen, not only the all-day
-    // current/daily summary.
-    let icon_band_top = temp_baseline + 16;
+    // Big condition icon centred in the band between the hourly strip and
+    // the forecast grid. Prefer the nearest upcoming hourly slot so the hero
+    // visual reflects what is about to happen, not only the daily summary.
+    let icon_band_top = hr_y + 48;
     let icon_band_bot = fc_y - 6;
     let icon_cy = (icon_band_top + icon_band_bot) / 2;
     let icon_cx = panel.x + panel.w as i32 / 2;
-    let icon_size = (icon_band_bot - icon_band_top - 8).clamp(40, 90);
+    let icon_size = (icon_band_bot - icon_band_top - 8).clamp(32, 90);
     let hero_cond = w.hourly.first().map(|h| h.cond.as_str()).unwrap_or(&w.condition);
     draw_weather_icon(c, icon_cx, icon_cy, icon_size, hero_cond, C::Black);
 
     if !data.shipments_due_today.is_empty() {
-        draw_mail_icon_big(c, panel.x + 40, panel.bottom() - 78, C::Red);
+        draw_mail_icon_big(c, panel.x + 34, icon_cy, C::Red);
     }
 
     let cell_w = (panel.w - 24) / 4;
-    for (i, day) in w.forecast.iter().take(4).enumerate() {
-        let cx = panel.x + 12 + (cell_w * i as u32) as i32 + cell_w as i32 / 2;
-        if i < 3 {
-            let dx = panel.x + 12 + (cell_w * (i + 1) as u32) as i32;
-            for k in 0..(fc_h / 4) {
-                c.put(dx, fc_y + (k * 4) as i32 + 2, C::Black);
-                c.put(dx, fc_y + (k * 4) as i32 + 3, C::Black);
+    for (i, day) in w.forecast.iter().take(8).enumerate() {
+        let col = (i % 4) as u32;
+        let row = (i / 4) as i32;
+        let cx = panel.x + 12 + (cell_w * col) as i32 + cell_w as i32 / 2;
+        let cy = fc_y + row * fc_row_h as i32;
+        if col < 3 {
+            let dx = panel.x + 12 + (cell_w * (col + 1)) as i32;
+            for k in 0..(fc_row_h / 4) {
+                c.put(dx, cy + (k * 4) as i32 + 2, C::Black);
+                c.put(dx, cy + (k * 4) as i32 + 3, C::Black);
             }
         }
-        draw_text(c, &f_small_bold(), &day.day, cx, fc_y + 12, C::Black, Align::Center);
-        draw_text(c, &f_xl_bold(), &format!("{}°", day.hi), cx, fc_y + 32, C::Black, Align::Center);
+        if row > 0 {
+            c.hline(panel.x + 12, cy, panel.w - 24, C::Black);
+        }
+        draw_text(c, &f_small_bold(), &day.day, cx, cy + 12, C::Black, Align::Center);
+        draw_text(c, &f_xl_bold(), &format!("{}°", day.hi), cx, cy + 31, C::Black, Align::Center);
 
         // Bottom row: small condition icon + lo temp instead of "° CLOUD".
         let lo_str = format!("{}°", day.lo);
         let lo_w = text_width(&f_small(), &lo_str) as i32;
-        let icon_w = 12i32;
+        let icon_w = 13i32;
         let row_w = lo_w + 4 + icon_w;
         let row_x0 = cx - row_w / 2;
-        draw_text(c, &f_small(), &lo_str, row_x0, fc_y + 44, C::Black, Align::Left);
-        draw_weather_icon(
-            c,
-            row_x0 + lo_w + 4 + icon_w / 2,
-            fc_y + 40,
-            icon_w,
-            &day.cond,
-            C::Black,
-        );
+        draw_text(c, &f_small(), &lo_str, row_x0, cy + 42, C::Black, Align::Left);
+        draw_weather_icon(c, row_x0 + lo_w + 4 + icon_w / 2, cy + 38, icon_w, &day.cond, C::Black);
     }
 }
 
@@ -523,6 +516,14 @@ fn draw_weather(c: &mut Canvas, data: &DashData, w: Option<&WeatherData>, stale:
 
 fn draw_weather_icon(c: &mut Canvas, cx: i32, cy: i32, size: i32, condition: &str, color: C) {
     let cond = condition.to_uppercase();
+    // The detailed glyphs are drawn from proportions of `size`, and below
+    // ~20px those proportions collapse: the sun's rays become 1px stubs
+    // around a 3px disc and the snowflakes merge into a smudge, leaving SUN
+    // and SNOW nearly identical. The hourly and forecast strips are full of
+    // icons that small, so they get silhouettes chosen to stay distinct.
+    if size < 20 {
+        return draw_weather_icon_small(c, cx, cy, size, &cond, color);
+    }
     match cond.as_str() {
         "SUN" | "CLEAR" | "SUNNY" | "FAIR" => draw_sun(c, cx, cy, size, color),
         "RAIN" | "RAINY" | "SHOWERS" | "DRIZZLE" => draw_rain(c, cx, cy, size, color),
@@ -531,6 +532,69 @@ fn draw_weather_icon(c: &mut Canvas, cx: i32, cy: i32, size: i32, condition: &st
         "FOG" | "MIST" | "HAZE" | "SMOKE" => draw_fog(c, cx, cy, size, color),
         // CLOUD / CLOUDS / CLOUDY / OVERCAST / unknown
         _ => draw_cloud(c, cx, cy, size, color),
+    }
+}
+
+/// Small-size weather glyphs, distinguished by silhouette rather than
+/// detail: a solid disc reads as sun at any size, and rain/snow differ by
+/// strokes versus dots rather than by the shape of a flake.
+fn draw_weather_icon_small(c: &mut Canvas, cx: i32, cy: i32, size: i32, cond: &str, color: C) {
+    let r = (size / 3).max(3);
+    // Cloud-based glyphs sit high so their precipitation has room below.
+    let puff = |c: &mut Canvas, cy: i32| {
+        let br = (size / 4).max(2);
+        fill_disc(c, cx - br, cy, br, color);
+        fill_disc(c, cx + br, cy, br, color);
+        fill_disc(c, cx, cy - br / 2, br + 1, color);
+        c.fill_rect(
+            Rect::new(cx - br * 2, cy, (br * 4) as u32, br.max(2) as u32),
+            color,
+        );
+    };
+    let step = (size / 4).max(3);
+    // Rain: three tall, evenly spaced 1px strokes — a neat comb.
+    let rain_marks = |c: &mut Canvas, top: i32| {
+        for i in -1..=1 {
+            c.fill_rect(Rect::new(cx + i * step, top, 1, (size / 3).max(4) as u32), color);
+        }
+    };
+    // Snow: dots scattered over two offset rows. A single row of dots is
+    // the same silhouette as rain's comb at this size; staggering them is
+    // what makes the two readable apart.
+    let snow_marks = |c: &mut Canvas, top: i32| {
+        for i in -1..=1 {
+            c.fill_rect(Rect::new(cx + i * step, top, 2, 2), color);
+        }
+        for i in [-1, 0] {
+            c.fill_rect(Rect::new(cx + i * step + step / 2, top + 3, 2, 2), color);
+        }
+    };
+
+    match cond {
+        "SUN" | "CLEAR" | "SUNNY" | "FAIR" => fill_disc(c, cx, cy, r, color),
+        "RAIN" | "RAINY" | "SHOWERS" | "DRIZZLE" => {
+            puff(c, cy - size / 5);
+            rain_marks(c, cy + size / 6);
+        }
+        "SNOW" | "SNOWY" | "SLEET" => {
+            puff(c, cy - size / 5);
+            snow_marks(c, cy + size / 6);
+        }
+        "STORM" | "THUNDER" | "THUNDERSTORM" => {
+            puff(c, cy - size / 5);
+            // Single bolt: two offset strokes read as a zigzag even at 3px.
+            let h = (size / 4).max(3);
+            c.fill_rect(Rect::new(cx, cy + size / 6, 2, h as u32), color);
+            c.fill_rect(Rect::new(cx - 2, cy + size / 6 + h / 2, 2, 2), color);
+        }
+        "FOG" | "MIST" | "HAZE" | "SMOKE" => {
+            let w = (size - 2).max(4) as u32;
+            for i in 0..3 {
+                let off = if i % 2 == 0 { 0 } else { 2 };
+                c.hline(cx - w as i32 / 2 + off, cy - 3 + i * 3, w - 2, color);
+            }
+        }
+        _ => puff(c, cy),
     }
 }
 

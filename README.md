@@ -24,7 +24,7 @@ The server renders the dashboard pixel-by-pixel in Rust (`embedded-graphics` + u
 
 | Column | Width | Panels |
 |---|---|---|
-| Left | 260 px | WX (current temp + 4-day forecast, full height) |
+| Left | 260 px | WX (current temp, next 6 hours, 8-day forecast, full height) |
 | Middle | 320 px | AGENDA (top) · BUDGET (bottom) |
 | Right | 220 px | SYS — hosts (top) · OPS — alerts (bottom) |
 

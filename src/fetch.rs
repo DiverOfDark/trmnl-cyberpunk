@@ -609,13 +609,19 @@ fn dow_from_date(date_str: &str) -> &'static str {
 
 impl Sources {
     async fn weather(&self) -> Result<WeatherData> {
+        /// Hours ahead shown in the strip.
+        const HOURLY_SLOTS: usize = 6;
+        /// Days after today shown in the forecast grid. `forecast_days` in
+        /// the request is this plus today.
+        const FORECAST_DAYS: usize = 8;
+
         let url = format!(
             "https://api.open-meteo.com/v1/forecast\
              ?latitude={}&longitude={}&timezone={}\
              &current=temperature_2m,weather_code\
              &hourly=temperature_2m,weather_code\
              &daily=weather_code,temperature_2m_max,temperature_2m_min\
-             &forecast_days=5",
+             &forecast_days=9",
             self.weather_lat,
             self.weather_lon,
             urlencoding::encode(&self.weather_tz),
@@ -673,7 +679,10 @@ impl Sources {
             let Some(dt_local) = Local.from_local_datetime(&naive).single() else {
                 continue;
             };
-            if dt_local.date_naive() != local_now.date_naive() || dt_local < local_now {
+            // Only "still ahead of us" — deliberately not "still today".
+            // Late in the evening a same-day filter leaves one or two slots,
+            // which is exactly when the next few hours matter most.
+            if dt_local < local_now {
                 continue;
             }
             hourly.push(WeatherHour {
@@ -681,7 +690,7 @@ impl Sources {
                 temp_c: hourly_temp.get(i).copied().unwrap_or(0.0).round() as i8,
                 cond: wmo_to_cond(*hourly_code.get(i).unwrap_or(&0)).to_string(),
             });
-            if hourly.len() >= 3 {
+            if hourly.len() >= HOURLY_SLOTS {
                 break;
             }
         }
@@ -690,7 +699,7 @@ impl Sources {
             .iter()
             .enumerate()
             .skip(1)
-            .take(4)
+            .take(FORECAST_DAYS)
             .map(|(i, date)| WeatherDay {
                 day: dow_from_date(date).to_string(),
                 hi: maxs.get(i).copied().unwrap_or(0.0).round() as i8,
