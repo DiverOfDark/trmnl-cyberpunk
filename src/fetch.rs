@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Utc, Weekday};
+use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Utc, Weekday};
 use reqwest::Client;
 use serde_json::Value;
 use tracing::{info, warn};
@@ -65,14 +65,63 @@ fn classify_group(
     }
 }
 
-/// Keep the last good budget around when the Actual stack flakes. We prefer
-/// cached real data over the built-in mock so the panel stays stable instead
-/// of flickering back to placeholder numbers during transient outages.
-fn fallback_budget(
-    cached_budget: Option<BudgetData>,
-    mock_budget: Option<BudgetData>,
-) -> Option<BudgetData> {
-    cached_budget.or(mock_budget)
+/// Ceiling on a single section's pull. The refresh runs on a background timer
+/// rather than in the request path, so a slow upstream costs nothing but its
+/// own freshness — this bound only exists so one wedged host can't stall the
+/// whole refresh cycle indefinitely.
+fn section_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("FETCH_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(45),
+    )
+}
+
+/// Fold one section's pull into `(value, status)`, preferring the last good
+/// value over a blank panel:
+///   `Ok(v)`              → fresh value
+///   `Err(NotConfigured)` → `empty` value, opted out, silent, never marked stale
+///   `Err(other)`         → last-good value retained and flagged stale, with a warn
+///
+/// Note there is deliberately no mock fallback: the panel would otherwise show
+/// invented numbers during an outage. Keeping the last real values and stamping
+/// the panel STALE says the same "don't panic, it's transient" thing honestly.
+fn resolve<T>(
+    label: &str,
+    result: std::result::Result<Result<T>, tokio::time::error::Elapsed>,
+    last_good: T,
+    empty: T,
+    prev: SectionStatus,
+    now: DateTime<Utc>,
+) -> (T, SectionStatus) {
+    let err = match result {
+        Ok(Ok(value)) => return (value, SectionStatus::fresh(now)),
+        Ok(Err(e)) if is_not_configured(&e) => return (empty, SectionStatus::unconfigured()),
+        Ok(Err(e)) => format!("{e:#}"),
+        Err(_) => format!("timed out after {:?}", section_timeout()),
+    };
+    let status = SectionStatus::failed(prev);
+    match status.last_ok {
+        Some(t) => warn!(
+            "{label} fetch failed: {err}; keeping data from {}",
+            t.with_timezone(&Local).format("%H:%M")
+        ),
+        None => warn!("{label} fetch failed: {err}; no previous data to fall back on"),
+    }
+    (last_good, status)
+}
+
+/// Read an upstream base URL, dropping any trailing slash. Every call site
+/// builds paths as `{base}/segment`, so a URL configured as
+/// `https://host/v1/` would otherwise produce `https://host/v1//segment` —
+/// which servers tolerate but makes logged URLs confusing to eyeball.
+fn base_url_env(var: &str) -> String {
+    std::env::var(var)
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('/')
+        .to_string()
 }
 
 pub struct Sources {
@@ -117,9 +166,9 @@ impl Sources {
             // docker-compose pass "" for unset values. An empty URL means
             // the integration is opted-out and the fetch fn returns
             // `NotConfigured` instead of attempting a request.
-            prometheus:       std::env::var("PROMETHEUS_URL").unwrap_or_default(),
-            alertmanager:     std::env::var("ALERTMANAGER_URL").unwrap_or_default(),
-            actualbudget_url: std::env::var("ACTUALBUDGET_URL").unwrap_or_default(),
+            prometheus:       base_url_env("PROMETHEUS_URL"),
+            alertmanager:     base_url_env("ALERTMANAGER_URL"),
+            actualbudget_url: base_url_env("ACTUALBUDGET_URL"),
             actualbudget_key: std::env::var("ACTUALBUDGET_KEY").unwrap_or_default(),
             actualbudget_sync_id: std::env::var("ACTUALBUDGET_SYNC_ID").unwrap_or_default(),
             actualbudget_password: std::env::var("ACTUALBUDGET_PASSWORD").unwrap_or_default(),
@@ -155,80 +204,86 @@ impl Sources {
                 .unwrap_or(13.33),
             weather_tz: std::env::var("WEATHER_TZ")
                 .unwrap_or_else(|_| "Europe/Berlin".into()),
-            trackhound_base_url: std::env::var("TRACKHOUND_BASE_URL").unwrap_or_default(),
+            trackhound_base_url: base_url_env("TRACKHOUND_BASE_URL"),
         }
     }
 
-    // Fetch all data concurrently; fall back to mock values per section on error.
-    pub async fn fetch(&self, mock: &DashData, cached_budget: Option<BudgetData>) -> DashData {
+    /// Pull every source concurrently. Sections that fail keep the values from
+    /// `prev` (the last served dashboard) and come back marked stale, so a
+    /// flaky upstream degrades one panel's freshness instead of blanking it.
+    pub async fn fetch(&self, prev: &DashData) -> DashData {
+        let t = section_timeout();
         let (hosts_r, cluster_r, weather_r, alerts_r, budget_r, agenda_r, shipments_r) = tokio::join!(
-            self.hosts(),
-            self.cluster(),
-            self.weather(),
-            self.alerts(),
-            tokio::time::timeout(Duration::from_secs(2), self.budget()),
-            self.agenda(),
-            self.shipments_due_today(),
+            tokio::time::timeout(t, self.hosts()),
+            tokio::time::timeout(t, self.cluster()),
+            tokio::time::timeout(t, self.weather()),
+            tokio::time::timeout(t, self.alerts()),
+            tokio::time::timeout(t, self.budget()),
+            tokio::time::timeout(t, self.agenda()),
+            tokio::time::timeout(t, self.shipments_due_today()),
         );
 
-        // Per-section dispatch (no mock fallback — mock data only shows up
-        // via LOCAL_MODE / RENDER_TO, never as a side-effect of a fetch
-        // failure, so the panel never lies about which integrations are
-        // working):
-        //   Ok(data)              → real data
-        //   Err(NotConfigured)    → empty / None, silent (opted out)
-        //   Err(other)            → empty / None, with a warn so the
-        //                            failure is visible in logs
-        fn warn_unless_unconfigured(label: &str, e: &anyhow::Error) {
-            if !is_not_configured(e) {
-                warn!("{label} fetch failed: {e:#}");
-            }
-        }
-        let hosts = hosts_r.unwrap_or_else(|e| {
-            warn_unless_unconfigured("hosts", &e);
-            Vec::new()
-        });
-        let cluster = match cluster_r {
-            Ok(c) => Some(c),
-            Err(e) => {
-                warn_unless_unconfigured("cluster", &e);
-                None
-            }
+        let stamp = Utc::now();
+        let p = prev.status;
+        let (hosts, s_hosts) =
+            resolve("hosts", hosts_r, prev.hosts.clone(), Vec::new(), p.hosts, stamp);
+        let (cluster, s_cluster) = resolve(
+            "cluster",
+            cluster_r.map(|r| r.map(Some)),
+            prev.cluster.clone(),
+            None,
+            p.cluster,
+            stamp,
+        );
+        let (weather, s_weather) = resolve(
+            "weather",
+            weather_r.map(|r| r.map(Some)),
+            prev.weather.clone(),
+            None,
+            p.weather,
+            stamp,
+        );
+        let (alerts, s_alerts) = resolve(
+            "alerts",
+            alerts_r,
+            prev.alerts.clone(),
+            Vec::new(),
+            p.alerts,
+            stamp,
+        );
+        let (budget, s_budget) = resolve(
+            "budget",
+            budget_r.map(|r| r.map(Some)),
+            prev.budget.clone(),
+            None,
+            p.budget,
+            stamp,
+        );
+        let (agenda, s_agenda) = resolve(
+            "agenda",
+            agenda_r,
+            prev.agenda.clone(),
+            Vec::new(),
+            p.agenda,
+            stamp,
+        );
+        let (shipments_due_today, s_shipments) = resolve(
+            "shipments",
+            shipments_r,
+            prev.shipments_due_today.clone(),
+            Vec::new(),
+            p.shipments,
+            stamp,
+        );
+        let status = Status {
+            hosts: s_hosts,
+            cluster: s_cluster,
+            weather: s_weather,
+            alerts: s_alerts,
+            budget: s_budget,
+            agenda: s_agenda,
+            shipments: s_shipments,
         };
-        let weather = match weather_r {
-            Ok(w) => Some(w),
-            Err(e) => {
-                warn_unless_unconfigured("weather", &e);
-                None
-            }
-        };
-        let alerts = alerts_r.unwrap_or_else(|e| {
-            warn_unless_unconfigured("alerts", &e);
-            Vec::new()
-        });
-        let shipments_due_today = shipments_r.unwrap_or_else(|e| {
-            warn_unless_unconfigured("shipments", &e);
-            Vec::new()
-        });
-        let budget = match budget_r {
-            Ok(Ok(b)) => Some(b),
-            Ok(Err(e)) => {
-                if is_not_configured(&e) {
-                    None
-                } else {
-                    warn_unless_unconfigured("budget", &e);
-                    fallback_budget(cached_budget.clone(), mock.budget.clone())
-                }
-            }
-            Err(_) => {
-                warn!("budget fetch timed out after 2s; keeping cached budget if available");
-                fallback_budget(cached_budget.clone(), mock.budget.clone())
-            }
-        };
-        let agenda = agenda_r.unwrap_or_else(|e| {
-            warn_unless_unconfigured("agenda", &e);
-            Vec::new()
-        });
 
         let now = Local::now();
         let months = [
@@ -254,7 +309,7 @@ impl Sources {
             time: now.format("%H:%M").to_string(),
             date: format!("{:02} {} {}", now.day(), month, now.year()),
             date_dow: dow.into(),
-            motto: mock.motto.clone(),
+            motto: pick_motto().into(),
             last_sync: now.format("%H:%M").to_string(),
             next_sync: next.format("%H:%M").to_string(),
             hosts,
@@ -264,6 +319,7 @@ impl Sources {
             budget,
             alerts,
             shipments_due_today,
+            status,
         }
     }
 }
@@ -1558,17 +1614,87 @@ mod tests {
         assert!(occurrences.is_empty(), "ended series shouldn't appear");
     }
 
-    /// When Actual is flaky, keep the last known budget instead of dropping
-    /// the panel back to the mock/default state.
+    /// When Actual is flaky, keep the last known budget on screen — but stamp
+    /// the section stale so the panel doesn't pass old numbers off as current.
     #[test]
-    fn cached_budget_wins_over_mock_budget() {
+    fn failed_fetch_keeps_last_good_and_marks_stale() {
+        let now = Utc::now();
         let cached = budget("cached", 12, 34);
-        let mock = budget("mock", 1, 2);
-        let chosen = fallback_budget(Some(cached.clone()), Some(mock));
+        let prev = SectionStatus::fresh(now - chrono::Duration::minutes(20));
+
+        let (value, status) = resolve(
+            "budget",
+            Ok(Err(anyhow!("500 Internal Server Error"))),
+            Some(cached.clone()),
+            None,
+            prev,
+            now,
+        );
+
         assert_eq!(
-            chosen.expect("cached budget should win").month_label,
+            value.expect("cached budget should be retained").month_label,
             cached.month_label
         );
+        assert_eq!(status.marker(now).as_deref(), Some("STALE 20m"));
+    }
+
+    /// An unconfigured integration is opted out, not broken: it empties the
+    /// panel and stays unmarked.
+    #[test]
+    fn unconfigured_section_is_empty_and_unmarked() {
+        let now = Utc::now();
+        let (value, status) = resolve(
+            "budget",
+            Ok(Err(anyhow!(NotConfigured("ACTUALBUDGET_URL")))),
+            Some(budget("cached", 12, 34)),
+            None,
+            SectionStatus::fresh(now),
+            now,
+        );
+
+        assert!(value.is_none());
+        assert_eq!(status, SectionStatus::unconfigured());
+        assert_eq!(status.marker(now), None);
+    }
+
+    /// A section that has never succeeded says so, rather than reporting an
+    /// age it doesn't have.
+    #[tokio::test]
+    async fn never_fetched_section_reports_no_data() {
+        let now = Utc::now();
+        let (_, status) = resolve(
+            "hosts",
+            timeout_elapsed().await,
+            Vec::<HostData>::new(),
+            Vec::new(),
+            SectionStatus::default(),
+            now,
+        );
+        assert_eq!(status.marker(now).as_deref(), Some("NO DATA"));
+    }
+
+    /// A panel fed by two sources shows the freshness of its worst one.
+    #[test]
+    fn panel_freshness_follows_worst_source() {
+        let now = Utc::now();
+        let status = Status {
+            hosts: SectionStatus::fresh(now),
+            cluster: SectionStatus::failed(SectionStatus::fresh(
+                now - chrono::Duration::hours(3),
+            )),
+            ..Status::all_fresh(now)
+        };
+        assert_eq!(status.sys().marker(now).as_deref(), Some("STALE 3h"));
+        assert_eq!(status.wx().marker(now), None);
+        assert_eq!(status.degraded(now), vec![("SYS", "STALE 3h".to_string())]);
+    }
+
+    /// `tokio::time::error::Elapsed` has no public constructor, so brew a
+    /// timed-out result by racing a never-completing future against a zero
+    /// deadline. Typed to match what `resolve` receives from `join!`.
+    async fn timeout_elapsed() -> std::result::Result<Result<Vec<HostData>>, tokio::time::error::Elapsed>
+    {
+        tokio::time::timeout(Duration::ZERO, std::future::pending()).await
     }
 }
 

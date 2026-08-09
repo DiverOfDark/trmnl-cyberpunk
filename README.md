@@ -64,7 +64,9 @@ curl http://localhost:8080/refresh
 | Variable | Default | Description |
 |---|---|---|
 | `BASE_URL` | `http://localhost:8080` | Public URL the TRMNL device uses to fetch the PNG |
-| `REFRESH_SECS` | `3600` | Upstream-refetch interval, also reported to the firmware as its poll cadence (seconds) |
+| `REFRESH_SECS` | `3600` | Poll cadence reported to the firmware (seconds) |
+| `FETCH_INTERVAL_SECS` | `300` | How often the background task refetches upstreams (seconds). Independent of the device's poll cadence |
+| `FETCH_TIMEOUT_SECS` | `45` | Per-source ceiling on one upstream pull; a source that overruns keeps its last values and is marked stale |
 | `TRMNL_API_KEY` | `cyberpunk-byos` | API key returned to the device on `/api/setup` |
 | `LISTEN` | `0.0.0.0:8080` | Bind address |
 | `RUST_LOG` | `trmnl_cyberpunk=info` | Log level |
@@ -114,7 +116,11 @@ Per-request render (every device fetch):
      defeating the firmware's 24h dedupe cache
 ```
 
-A background task refetches upstreams every `REFRESH_SECS` (first run fires 500 ms after startup). Concurrent upstream fetches are deduped via a mutex; the render itself is per-request and never cached server-side.
+A background task refetches upstreams every `FETCH_INTERVAL_SECS`, with the first run fired at startup. Requests never fetch: `/dashboard.png` renders from the cached snapshot and returns in tens of milliseconds regardless of how slow (or unreachable) the upstreams are. `/refresh` forces a synchronous pull; concurrent pulls are deduped via a mutex.
+
+### Staleness
+
+Each source's last successful pull is timestamped. When a source fails, its panel keeps the last good values rather than blanking — but the panel header swaps its `// NN` sequence label for a red **`STALE 12m`** tag (or **`NO DATA`** if it has never succeeded since boot), and the footer switches from `ONLINE` to `DEGRADED:` plus the affected panels. Sources whose env vars are unset are opted out, not stale, and are never marked. Mock data appears only under `LOCAL_MODE` / `RENDER_TO` — never as an outage fallback, so nothing on the panel is invented.
 
 ---
 
