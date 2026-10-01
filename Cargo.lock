@@ -1742,6 +1742,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "chrono",
  "chrono-tz",
  "embedded-graphics",
@@ -1749,6 +1750,7 @@ dependencies = [
  "png",
  "pulldown-cmark",
  "reqwest",
+ "ring",
  "rrule",
  "serde",
  "serde_json",

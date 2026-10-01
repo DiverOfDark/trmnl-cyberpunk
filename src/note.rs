@@ -98,6 +98,7 @@ impl NoteStore {
 pub enum Screen {
     Dashboard,
     Note,
+    Desk,
 }
 
 #[cfg(test)]

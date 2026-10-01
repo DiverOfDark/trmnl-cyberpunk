@@ -97,7 +97,8 @@ timezone: "Europe/Berlin"
 #
 # The web editor at / saves one markdown memo to $DATA_DIR/note.md,
 # which the devices assigned to it show full-screen. The per-device
-# assignments made in /devices go to $DATA_DIR/devices.json.
+# assignments made in /devices go to $DATA_DIR/devices.json, and the
+# Claude / Codex sign-ins made in /agents (desk screen) live there too.
 # Without persistence both live in an emptyDir and are lost when the pod goes.
 #
 # Off by default so turning it on is a deliberate choice of storageClass:
@@ -145,6 +146,10 @@ weatherTz: "Europe/Berlin"
 # trackhound base URL for parcel highlights.
 # See https://github.com/DiverOfDark/trackhound
 trackhoundBaseUrl: ""
+
+# GitHub account whose contribution heatmap the desk screen shows (public
+# profile calendar, no token needed).
+githubUser: ""
 
 # ── Secrets ──────────────────────────────────────────────────────────────
 #

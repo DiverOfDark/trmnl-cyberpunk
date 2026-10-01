@@ -91,6 +91,9 @@ pub struct Status {
     pub budget: SectionStatus,
     pub agenda: SectionStatus,
     pub shipments: SectionStatus,
+    pub claude: SectionStatus,
+    pub codex: SectionStatus,
+    pub github: SectionStatus,
 }
 
 impl Status {
@@ -101,6 +104,7 @@ impl Status {
         Self {
             hosts: f, cluster: f, weather: f, alerts: f,
             budget: f, agenda: f, shipments: f,
+            claude: f, codex: f, github: f,
         }
     }
 
@@ -126,26 +130,49 @@ impl Status {
         [
             self.hosts, self.cluster, self.weather, self.alerts,
             self.budget, self.agenda, self.shipments,
+            self.claude, self.codex, self.github,
         ]
         .into_iter()
         .filter_map(|s| s.last_ok)
         .max()
     }
 
-    /// `(panel tag, marker)` for every panel currently degraded — drives the
-    /// footer summary so a glance at the bottom line says whether anything on
-    /// screen is out of date.
+    pub fn agents_panel(&self) -> SectionStatus {
+        SectionStatus::worse_of(self.claude, self.codex)
+    }
+
+    /// `(panel tag, marker)` for every dashboard panel currently degraded —
+    /// drives the footer summary so a glance at the bottom line says whether
+    /// anything on screen is out of date.
     pub fn degraded(&self, now: DateTime<Utc>) -> Vec<(&'static str, String)> {
-        [
+        Self::markers(now, [
             ("WX", self.wx()),
             ("AGENDA", self.agenda_panel()),
             ("SYS", self.sys()),
             ("€", self.budget_panel()),
             ("OPS", self.ops()),
-        ]
-        .into_iter()
-        .filter_map(|(tag, s)| s.marker(now).map(|m| (tag, m)))
-        .collect()
+        ])
+    }
+
+    /// The same summary for the desk screen's panels. Kept apart from
+    /// `degraded` so a dashboard never reports a source it doesn't show.
+    pub fn desk_degraded(&self, now: DateTime<Utc>) -> Vec<(&'static str, String)> {
+        Self::markers(now, [
+            ("AGENTS", self.agents_panel()),
+            ("NEXT", self.agenda),
+            ("OPS", self.ops()),
+            ("GITHUB", self.github),
+        ])
+    }
+
+    fn markers<const N: usize>(
+        now: DateTime<Utc>,
+        panels: [(&'static str, SectionStatus); N],
+    ) -> Vec<(&'static str, String)> {
+        panels
+            .into_iter()
+            .filter_map(|(tag, s)| s.marker(now).map(|m| (tag, m)))
+            .collect()
     }
 }
 
@@ -385,6 +412,82 @@ pub struct ShipmentHighlight {
     pub status: String,
 }
 
+/// Rate-limit state of one coding-agent subscription (Claude, Codex): a
+/// rolling 5-hour session window and a weekly one, each as percent used.
+#[derive(Clone, Serialize)]
+pub struct AgentUsage {
+    /// Short display name, e.g. `CLAUDE`.
+    pub name: String,
+    /// 5-hour session window, percent used (0..100).
+    pub session_pct: u8,
+    /// When the session window resets. `None` while it hasn't started.
+    pub session_resets: Option<DateTime<Utc>>,
+    /// Length of the session window, seconds (5h for both providers today).
+    pub session_window_secs: i64,
+    /// Weekly window, percent used (0..100).
+    pub week_pct: u8,
+    pub week_resets: Option<DateTime<Utc>>,
+    pub week_window_secs: i64,
+    /// The provider says requests are being refused right now.
+    pub limited: bool,
+}
+
+impl AgentUsage {
+    /// Share of a window already elapsed at `now`, percent. `None` when the
+    /// window has no reset time (nothing used yet, so nothing has started).
+    fn elapsed_pct(resets: Option<DateTime<Utc>>, window: i64, now: DateTime<Utc>) -> Option<f64> {
+        let left = (resets? - now).num_seconds().clamp(0, window);
+        Some((window - left) as f64 * 100.0 / window.max(1) as f64)
+    }
+
+    /// Where the session window will end up if usage continues at its
+    /// average rate so far, percent (capped at 100). `None` in the first
+    /// quarter hour, when a single prompt would extrapolate to a wall.
+    pub fn session_projection(&self, now: DateTime<Utc>) -> Option<u8> {
+        let elapsed = Self::elapsed_pct(self.session_resets, self.session_window_secs, now)?;
+        let elapsed_secs = elapsed / 100.0 * self.session_window_secs as f64;
+        (elapsed_secs >= 900.0)
+            .then(|| (self.session_pct as f64 * 100.0 / elapsed).round().min(100.0) as u8)
+    }
+
+    /// How far through the week we are, percent: the point where usage would
+    /// sit if spread evenly. `None` before the week window has started.
+    pub fn week_pace(&self, now: DateTime<Utc>) -> Option<u8> {
+        Self::elapsed_pct(self.week_resets, self.week_window_secs, now).map(|p| p.round() as u8)
+    }
+
+    /// Requests are refused, or one of the windows is spent.
+    pub fn is_limited(&self) -> bool {
+        self.limited || self.session_pct >= 100 || self.week_pct >= 100
+    }
+
+    /// When a limited agent comes back: the later reset among the spent
+    /// windows (the session window alone when the provider didn't say which).
+    pub fn back_at(&self) -> Option<DateTime<Utc>> {
+        if self.week_pct >= 100 {
+            self.week_resets.max(self.session_resets)
+        } else {
+            self.session_resets
+        }
+    }
+}
+
+/// One day of the GitHub contribution calendar.
+#[derive(Clone, Copy, Serialize)]
+pub struct ContributionDay {
+    pub date: chrono::NaiveDate,
+    /// GitHub's own 0..4 intensity bucket, relative to the user's year.
+    pub level: u8,
+    pub count: u32,
+}
+
+#[derive(Clone, Serialize)]
+pub struct GithubData {
+    pub user: String,
+    /// About a year of days, oldest first.
+    pub days: Vec<ContributionDay>,
+}
+
 #[derive(Clone, Serialize)]
 pub struct DashData {
     pub time: String,
@@ -407,6 +510,13 @@ pub struct DashData {
     pub budget: Option<BudgetData>,
     pub alerts: Vec<Alert>,
     pub shipments_due_today: Vec<ShipmentHighlight>,
+    /// Coding-agent rate limits for the desk screen. `None` when the
+    /// provider's credentials aren't configured.
+    pub claude: Option<AgentUsage>,
+    pub codex: Option<AgentUsage>,
+    /// GitHub contribution calendar for the desk screen. `None` when
+    /// `GITHUB_USER` isn't set.
+    pub github: Option<GithubData>,
     /// Per-source freshness of everything above. The dashboard is rendered
     /// from cache, so this is how the panel admits when what it's showing is
     /// older than it looks.
@@ -490,6 +600,9 @@ impl DashData {
             budget: None,
             alerts: Vec::new(),
             shipments_due_today: Vec::new(),
+            claude: None,
+            codex: None,
+            github: None,
             status: Status::default(),
         };
         d.refresh_clock();
@@ -629,6 +742,41 @@ impl DashData {
             shipments_due_today: vec![
                 ShipmentHighlight { number: "00340435063414124778".into(), remark: "SeeedStudio - reTerminal".into(), status: "Delivered today".into() },
             ],
+            claude: Some(AgentUsage {
+                name: "CLAUDE".into(),
+                session_pct: 42,
+                session_resets: Some(Utc::now() + chrono::Duration::minutes(133)),
+                session_window_secs: 5 * 3600,
+                week_pct: 44,
+                week_resets: Some(Utc::now() + chrono::Duration::hours(114)),
+                week_window_secs: 7 * 86_400,
+                limited: false,
+            }),
+            codex: Some(AgentUsage {
+                name: "CODEX".into(),
+                session_pct: 23,
+                session_resets: Some(Utc::now() + chrono::Duration::minutes(218)),
+                session_window_secs: 5 * 3600,
+                week_pct: 61,
+                week_resets: Some(Utc::now() + chrono::Duration::hours(45)),
+                week_window_secs: 7 * 86_400,
+                limited: false,
+            }),
+            github: Some(GithubData {
+                user: "octocat".into(),
+                // A year of weekday-heavy activity with a quiet stretch,
+                // deterministic so previews don't flicker.
+                days: (0..365)
+                    .map(|i| {
+                        let date = now.date_naive() - chrono::Duration::days(364 - i);
+                        let wd = date.weekday().num_days_from_monday() as i64;
+                        let quiet = (200..215).contains(&i);
+                        let count = if quiet || wd >= 5 && i % 3 != 0 { 0 } else { ((i * 7 + wd * 5) % 13) as u32 };
+                        let level = match count { 0 => 0, 1..=3 => 1, 4..=6 => 2, 7..=9 => 3, _ => 4 };
+                        ContributionDay { date, level, count }
+                    })
+                    .collect(),
+            }),
             // Mock data is fabricated on the spot, so nothing is ever stale.
             status: Status::all_fresh(Utc::now()),
         }

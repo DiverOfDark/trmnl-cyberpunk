@@ -52,6 +52,11 @@ services:
       # See https://github.com/DiverOfDark/trackhound
       TRACKHOUND_BASE_URL: ""
 
+      # Desk screen (assign it per device on /devices).
+      # AGENTS: sign Claude and Codex in at /agents; the logins live in /data.
+      # GitHub account whose contribution heatmap the desk screen shows.
+      GITHUB_USER: ""
+
       # Offer the bundled patched firmware (see firmware/) to the device as
       # an OTA update. "false" to disable.
       FIRMWARE_UPDATE: "true"

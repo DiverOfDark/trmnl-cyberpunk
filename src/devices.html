@@ -89,6 +89,7 @@
   <div class="hatch"></div>
   <div class="status" id="status" data-state="saved"><i></i><span>LOADING</span></div>
   <a class="nav" href="./">MEMO //</a>
+  <a class="nav" href="agents">AGENTS //</a>
   <a class="nav" href="swagger/" title="REST API (Swagger UI)">API //</a>
 </header>
 <main id="list"></main>
@@ -113,6 +114,7 @@
     <div class="bar" role="group" aria-label="Screen">
       <button type="button" data-mode="dashboard">DASHBOARD</button>
       <button type="button" data-mode="note">MEMO</button>
+      <button type="button" data-mode="desk">DESK</button>
     </div>
     <p class="hint"></p>
   </section>
@@ -130,8 +132,9 @@
   const HINTS = {
     dashboard: 'Always shows the dashboard.',
     note: 'Always shows the memo.',
+    desk: 'Shows agent limits, today\'s events, alerts and the memo.',
   };
-  const SCREENS = { dashboard: 'DASHBOARD', note: 'MEMO' };
+  const SCREENS = { dashboard: 'DASHBOARD', note: 'MEMO', desk: 'DESK' };
 
   const ago = (iso) => {
     const s = Math.max(0, (Date.now() - new Date(iso)) / 1000);

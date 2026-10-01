@@ -19,7 +19,8 @@ The server renders the dashboard pixel-by-pixel in Rust (`embedded-graphics` + u
 - 4-bit indexed PNG output: every pixel is exactly one of the six panel inks (no dithering, no antialiasing) so the panel renders what we drew
 - Pluggable upstreams: Prometheus + Alertmanager, Nextcloud CalDAV, ActualBudget, Open-Meteo, [trackhound](https://github.com/DiverOfDark/trackhound). Mock fallbacks for everything when env vars are blank
 - Memo screen: write markdown in a WYSIWYG web editor at `/`; it autosaves to disk and the device shows it on its next wake-up
-- Multiple devices: `/devices` lists every panel with its last battery, signal, firmware and check-in time, and assigns each one either the dashboard or the memo
+- Desk screen: Claude and Codex rate limits, a GitHub contribution heatmap, today's events and alerts, and the memo across the bottom
+- Multiple devices: `/devices` lists every panel with its last battery, signal, firmware and check-in time, and assigns each one the dashboard, the memo or the desk screen
 - Norse-mythology mock hostnames, multi-day weather, calendar agenda, budget categories, alert feed
 
 ### Dashboard panels
@@ -75,6 +76,7 @@ curl http://localhost:8080/refresh
 | `LOCAL_MODE` | _(unset)_ | If set, never fetch upstreams — serve mock data only |
 | `RENDER_TO` | _(unset)_ | If set to a path, render one PNG with mock data, write it, and exit |
 | `DATA_DIR` | `./data` (`/data` in the image) | Where the memo (`note.md`) and device settings (`devices.json`) are stored. Mount a volume here |
+| `GITHUB_USER` | _(unset)_ | Desk screen: GitHub account whose contribution heatmap is shown |
 | `FIRMWARE_UPDATE` | _(on)_ | Set to `false` to stop offering the bundled firmware as an OTA update |
 | `FIRMWARE_MODEL` | `reterminal_e1002` | Device `Model` header the bundled firmware is offered to |
 | `FIRMWARE_DIR` | `/app/firmware` | Directory with `firmware.bin` + `version.txt` |
@@ -110,11 +112,31 @@ Which devices show the memo is set per device on the devices page (below); a dev
 
 The memo is fitted, not scrolled. It's set in the largest of five type sizes that holds the whole note, from Inconsolata 24 for a few lines down to 6×13 for a page of text; anything longer is cut at the last whole line with a red `MORE IN EDITOR` tag. Headings, bold, emphasis (blue), strikethrough, inline and block code, quotes, rules, links, bullet/numbered lists and task lists render. Tables are drawn one row per line. Latin, € and Cyrillic are covered; typographic dashes and quotes fold to ASCII, and other glyphs (emoji) print as `?`.
 
+### The desk screen
+
+![Desk screen rendered with mock data](desk.png)
+
+Assign **DESK** to a panel on `/devices`, or preview it at `/desk.png`. It's built for a panel on a work desk:
+
+- **AGENTS** — for Claude and Codex each: the 5-hour session window as a big percent, with a hatched tail showing where it ends up at the current rate (`PROJ`); the weekly window with a red tick at even pace, and an `OVER PACE` / `ON PACE` / `UNDER PACE` verdict (±5 points). A spent window turns into a red `LIMITED · BACK 16:40`. Below, the GitHub contribution heatmap.
+- **TODAY** — the next timed event and how long until it, then the rest of today's events one line each, all-day events last.
+- **OPS** — the same Alertmanager alerts as the dashboard, one line each.
+- **MEMO** — the memo across the full width under those two, with a `2 / 7 DONE` count when it has task-list items. It's fitted like the memo screen but starts at the 8×13 face, so it reads as a list rather than a poster.
+
+**Rate limits** come from the same endpoints the CLIs use for `/usage`. Sign the server in on **`/agents`** (linked from the editor and devices pages):
+
+- **Claude** — *SIGN IN* opens Claude's consent page in a new tab. Approve, copy the code it shows, paste it back. The server asks only for `user:profile user:inference`.
+- **Codex** — *SIGN IN* shows a code; enter it at `auth.openai.com/codex/device`. The page notices the approval by itself.
+
+Each is a login of the server's own, separate from any CLI session, so neither logs the other out. Tokens are kept in `$DATA_DIR` (`claude-credentials.json`, `codex-auth.json`) and refreshed when they run out — so `$DATA_DIR` must persist (a volume, or `persistence.enabled` in Helm). *SIGN OUT* deletes them. Like the rest of the web UI, `/agents` has no authentication of its own: keep the server on a trusted network or behind an authenticating proxy.
+
+**GitHub** — set `GITHUB_USER` and the bottom of the agents column shows that account's contribution calendar, as many recent weeks as fit, today framed in red. It's read from the public profile calendar, so no token is needed; private contributions count if the profile is set to show them.
+
 ### Devices
 
 `/devices` (linked from the editor header) shows one card per panel that has polled the server: name, MAC, model, when it last checked in (ONLINE / LATE / OFFLINE against its wake interval), which screen it was handed, battery % and voltage, WiFi RSSI, firmware and wake interval. The page reloads every 15 seconds.
 
-Each card picks the device's screen: **DASHBOARD** (where a new device starts) or **MEMO** (its empty state included while there is no memo). The name is drawn in the panel's top-left tab (`TRMNL` while unnamed): bold Helvetica for Latin, a Cyrillic face otherwise, stepping down a size and then cut with `..` if it's too long. Names and assignments apply on the device's next wake-up. ✕ forgets a device; it reappears with default settings if it polls again.
+Each card picks the device's screen: **DASHBOARD** (where a new device starts), **MEMO** (its empty state included while there is no memo) or **DESK**. The name is drawn in the panel's top-left tab (`TRMNL` while unnamed): bold Helvetica for Latin, a Cyrillic face otherwise, stepping down a size and then cut with `..` if it's too long. Names and assignments apply on the device's next wake-up. ✕ forgets a device; it reappears with default settings if it polls again.
 
 Everything is stored in `$DATA_DIR/devices.json` — settings plus each device's last status, so the list isn't blank after a restart. It's a plain JSON array and can be edited by hand while the server is stopped. The device-less previews (`/dashboard.png`, `/note.png`) borrow the name and readings of the device that polled last.
 

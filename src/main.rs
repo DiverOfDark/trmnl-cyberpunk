@@ -1,8 +1,11 @@
+mod agents;
 mod dashboard;
 mod data;
+mod desk;
 mod devices;
 mod fetch;
 mod firmware;
+mod github;
 mod note;
 mod note_screen;
 mod render;
@@ -19,7 +22,7 @@ use axum::{
     Router,
 };
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -27,6 +30,7 @@ use trmnl::{DeviceInfo, DisplayResponse};
 use utoipa::{OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 
+use agents::{Agents, LoginStatus, Pending, Provider};
 use data::DashData;
 use devices::{device_key, Device, DevicePatch, DeviceStore, Mode};
 use fetch::Sources;
@@ -46,6 +50,8 @@ struct AppState {
     note: Arc<NoteStore>,
     /// Registered panels: settings, screen assignment and last status.
     devices: Arc<DeviceStore>,
+    /// Claude / Codex sign-ins (the same logins the fetcher reads usage with).
+    agents: Arc<Agents>,
     /// Patched firmware build offered to the device as an OTA update.
     firmware: Option<Arc<Firmware>>,
 }
@@ -101,10 +107,15 @@ fn note_url(device: &str, epoch: i64) -> String {
     format!("{}/note/{device}/{epoch}", base_url())
 }
 
+fn desk_url(device: &str, epoch: i64) -> String {
+    format!("{}/desk/{device}/{epoch}", base_url())
+}
+
 fn build_display_response(device: &str, epoch: i64, screen: Screen) -> DisplayResponse {
     let url = match screen {
         Screen::Dashboard => dashboard_url(device, epoch),
         Screen::Note => note_url(device, epoch),
+        Screen::Desk => desk_url(device, epoch),
     };
     DisplayResponse::new(url, dashboard_filename(epoch)).with_refresh_rate(refresh_secs())
 }
@@ -168,6 +179,7 @@ async fn render_now(state: &AppState, screen: Screen, device: Option<&str>) -> a
     let bytes = tokio::task::spawn_blocking(move || match screen {
         Screen::Dashboard => dashboard::render(&data, &unit, battery, rssi),
         Screen::Note => note_screen::render(&data, &note, &unit, battery, rssi),
+        Screen::Desk => desk::render(&data, &note, &unit, battery, rssi),
     })
     .await??;
 
@@ -255,6 +267,23 @@ async fn serve_png(State(state): State<AppState>) -> Response {
 )]
 async fn serve_note(State(state): State<AppState>) -> Response {
     serve_screen(&state, Screen::Note, None).await
+}
+
+#[utoipa::path(
+    get,
+    path = "/desk.png",
+    responses((status = 200, description = "Desk screen: agent limits, today's events, alerts and the memo", content_type = "image/png")),
+    tag = "screens",
+)]
+async fn serve_desk(State(state): State<AppState>) -> Response {
+    serve_screen(&state, Screen::Desk, None).await
+}
+
+async fn serve_device_desk(
+    State(state): State<AppState>,
+    Path((device, _epoch)): Path<(String, String)>,
+) -> Response {
+    serve_screen(&state, Screen::Desk, Some(&device)).await
 }
 
 /// Per-device screen URLs handed out by `/api/display`; `_epoch` is only the
@@ -373,6 +402,137 @@ async fn put_note(State(state): State<AppState>, body: String) -> Response {
     }
 }
 
+// ── Agent sign-in ─────────────────────────────────────────────────────────────
+
+async fn agents_page() -> Html<&'static str> {
+    Html(include_str!("agents.html"))
+}
+
+#[derive(Serialize, ToSchema)]
+struct AgentDto {
+    #[serde(flatten)]
+    login: LoginStatus,
+    /// Last pulled rate limits, percent used. `null` until a pull succeeds.
+    session_pct: Option<u8>,
+    week_pct: Option<u8>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/agents",
+    responses((status = 200, description = "Sign-in state and last limits of each agent", body = [AgentDto])),
+    tag = "agents",
+)]
+async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentDto>> {
+    let data = state.data.read().await;
+    let agents = state
+        .agents
+        .status()
+        .await
+        .into_iter()
+        .map(|login| {
+            let usage = match login.provider.as_str() {
+                "claude" => data.claude.as_ref(),
+                _ => data.codex.as_ref(),
+            }
+            .filter(|_| login.signed_in);
+            AgentDto {
+                session_pct: usage.map(|u| u.session_pct),
+                week_pct: usage.map(|u| u.week_pct),
+                login,
+            }
+        })
+        .collect();
+    Json(agents)
+}
+
+fn bad_provider() -> Response {
+    (StatusCode::BAD_REQUEST, "provider must be claude or codex").into_response()
+}
+
+/// Start signing in. The response's `pending` says what to do next: open a
+/// link and paste back a code (Claude), or enter a code on a page (Codex).
+#[utoipa::path(
+    post,
+    path = "/api/agents/{provider}/login",
+    params(("provider" = String, Path, description = "`claude` or `codex`")),
+    responses(
+        (status = 200, description = "Sign-in started", body = Pending),
+        (status = 502, description = "The provider refused to start one"),
+    ),
+    tag = "agents",
+)]
+async fn start_login(State(state): State<AppState>, Path(provider): Path<String>) -> Response {
+    let Some(provider) = Provider::parse(&provider) else {
+        return bad_provider();
+    };
+    if let Err(e) = state.agents.start_login(provider).await {
+        warn!("starting sign-in failed: {e:#}");
+        return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response();
+    }
+    let status = state.agents.status().await;
+    let pending = status.into_iter().find_map(|s| (Provider::parse(&s.provider) == Some(provider)).then_some(s.pending)).flatten();
+    Json(pending).into_response()
+}
+
+#[derive(Deserialize, ToSchema)]
+struct PastedCode {
+    /// What the page showed after approving (`code#state`), or the callback URL.
+    code: String,
+}
+
+/// Finish a Claude sign-in with the code its callback page showed.
+#[utoipa::path(
+    post,
+    path = "/api/agents/claude/code",
+    request_body = PastedCode,
+    responses(
+        (status = 204, description = "Signed in"),
+        (status = 400, description = "Wrong or expired code; the sign-in stays open for another try"),
+    ),
+    tag = "agents",
+)]
+async fn finish_claude(State(state): State<AppState>, Json(body): Json<PastedCode>) -> Response {
+    match state.agents.finish_claude(&body.code).await {
+        Ok(()) => {
+            spawn_refresh(&state);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
+    }
+}
+
+/// Sign out (and drop any sign-in in progress). The stored tokens are deleted.
+#[utoipa::path(
+    delete,
+    path = "/api/agents/{provider}/login",
+    params(("provider" = String, Path, description = "`claude` or `codex`")),
+    responses((status = 204, description = "Signed out")),
+    tag = "agents",
+)]
+async fn sign_out(State(state): State<AppState>, Path(provider): Path<String>) -> Response {
+    let Some(provider) = Provider::parse(&provider) else {
+        return bad_provider();
+    };
+    match state.agents.sign_out(provider).await {
+        Ok(()) => {
+            spawn_refresh(&state);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => {
+            warn!("signing out failed: {e:#}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "sign-out failed").into_response()
+        }
+    }
+}
+
+/// Re-pull upstreams in the background so a sign-in shows up on the panel
+/// without waiting out the fetch interval.
+fn spawn_refresh(state: &AppState) {
+    let state = state.clone();
+    tokio::spawn(async move { refresh_data(&state).await });
+}
+
 // ── Devices ───────────────────────────────────────────────────────────────────
 
 async fn devices_page() -> Html<&'static str> {
@@ -456,11 +616,12 @@ async fn delete_device(State(state): State<AppState>, Path(mac): Path<String>) -
         description = "BYOS server for TRMNL e-ink panels. The device-protocol endpoints (`/api/setup`, `/api/display`, `/api/log`) and the cache-busted screen URLs (`/dashboard/{epoch}`, `/note/{epoch}`) are reachable too but are driven by the firmware, so they aren't part of this schema.",
         version = env!("CARGO_PKG_VERSION"),
     ),
-    paths(get_note, put_note, list_devices, patch_device, delete_device, serve_png, serve_note, force_refresh, health),
-    components(schemas(NoteDto, NoteSaved, DevicesDto, Device, DevicePatch, Mode, Screen)),
+    paths(get_note, put_note, list_devices, patch_device, delete_device, list_agents, start_login, finish_claude, sign_out, serve_png, serve_note, serve_desk, force_refresh, health),
+    components(schemas(NoteDto, NoteSaved, DevicesDto, Device, DevicePatch, Mode, Screen, AgentDto, LoginStatus, Pending, PastedCode)),
     tags(
         (name = "memo", description = "Read and write the memo screen's markdown"),
         (name = "devices", description = "Registered panels, their last status, and which screen each shows"),
+        (name = "agents", description = "Claude / Codex sign-in for the desk screen"),
         (name = "screens", description = "Rendered 800x480 panel images"),
         (name = "ops", description = "Refresh and health"),
     ),
@@ -500,17 +661,19 @@ async fn main() {
     // or two before the priming fetch lands gets empty panels rather than mock
     // numbers a viewer would read as real. LOCAL_MODE is the one place mock
     // data belongs.
+    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".into());
+
     let initial_data = if local_mode {
         DashData::mock()
     } else {
         DashData::empty()
     };
 
-    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".into());
-
+    let sources = Arc::new(Sources::from_env(std::path::Path::new(&data_dir)));
     let state = AppState {
         data: Arc::new(RwLock::new(initial_data)),
-        sources: Arc::new(Sources::from_env()),
+        agents: sources.agents.clone(),
+        sources,
         fetch_lock: Arc::new(tokio::sync::Mutex::new(())),
         local_mode,
         note: Arc::new(NoteStore::open(&data_dir).await),
@@ -533,6 +696,13 @@ async fn main() {
         .route("/note.png", get(serve_note))
         .route("/note/{epoch}", get(serve_note))
         .route("/note/{device}/{epoch}", get(serve_device_note))
+        .route("/desk.png", get(serve_desk))
+        .route("/desk/{epoch}", get(serve_desk))
+        .route("/desk/{device}/{epoch}", get(serve_device_desk))
+        .route("/agents", get(agents_page))
+        .route("/api/agents", get(list_agents))
+        .route("/api/agents/claude/code", post(finish_claude))
+        .route("/api/agents/{provider}/login", post(start_login).delete(sign_out))
         .route("/firmware/{file}", get(serve_firmware))
         .route("/refresh", get(force_refresh))
         .route("/health", get(health))
@@ -584,9 +754,10 @@ async fn main() {
         }
     );
     info!("Refreshing upstream data every {}s", fetch_interval_secs());
-    info!("Image    →  http://{bound}/dashboard.png");
+    info!("Image    →  http://{bound}/dashboard.png  ·  /desk.png");
     info!("Memo     →  http://{bound}/  (stored in {data_dir}/note.md)");
     info!("Devices  →  http://{bound}/devices  (stored in {data_dir}/devices.json)");
+    info!("Agents   →  http://{bound}/agents  (Claude / Codex sign-in for the desk screen)");
     info!("API docs →  http://{bound}/swagger");
     axum::serve(listener, app).await.expect("server error");
 }

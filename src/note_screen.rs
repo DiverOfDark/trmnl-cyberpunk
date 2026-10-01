@@ -35,7 +35,7 @@ use crate::render::{Canvas, Rect, C};
 // ── Faces ───────────────────────────────────────────────────────────────────
 
 /// A primary font plus fallbacks for glyphs it lacks, sharing metrics.
-struct Face {
+pub(crate) struct Face {
     fonts: Vec<FontRenderer>,
     /// Baseline offset from the top of the line box.
     ascent: i32,
@@ -43,7 +43,7 @@ struct Face {
 }
 
 impl Face {
-    fn new(fonts: Vec<FontRenderer>, ascent: i32, line_h: i32) -> Self {
+    pub(crate) fn new(fonts: Vec<FontRenderer>, ascent: i32, line_h: i32) -> Self {
         Self {
             fonts,
             ascent,
@@ -72,14 +72,14 @@ impl Face {
         runs
     }
 
-    fn width(&self, text: &str) -> i32 {
+    pub(crate) fn width(&self, text: &str) -> i32 {
         self.runs(text)
             .iter()
             .map(|(i, s)| text_width(&self.fonts[*i], s) as i32)
             .sum()
     }
 
-    fn draw(&self, c: &mut Canvas, text: &str, x: i32, baseline: i32, color: C, bold: bool) {
+    pub(crate) fn draw(&self, c: &mut Canvas, text: &str, x: i32, baseline: i32, color: C, bold: bool) {
         let mut x = x;
         for (i, s) in self.runs(text) {
             let font = &self.fonts[i];
@@ -130,10 +130,10 @@ macro_rules! face {
 }
 
 fn tiers() -> [Tier; 5] {
-    let x10 = || face!(15, 21; u8g2_font_10x20_te, u8g2_font_10x20_t_cyrillic);
-    let x9 = || face!(12, 17; u8g2_font_9x15_te, u8g2_font_9x15_t_cyrillic);
-    let x8 = || face!(11, 15; u8g2_font_8x13_te, u8g2_font_8x13_t_cyrillic);
-    let x6 = face!(10, 14; u8g2_font_6x13_te, u8g2_font_6x13_t_cyrillic);
+    let x10 = || face!(15, 20; u8g2_font_10x20_te, u8g2_font_10x20_t_cyrillic);
+    let x9 = || face!(12, 16; u8g2_font_9x15_te, u8g2_font_9x15_t_cyrillic);
+    let x8 = || face!(11, 14; u8g2_font_8x13_te, u8g2_font_8x13_t_cyrillic);
+    let x6 = face!(10, 13; u8g2_font_6x13_te, u8g2_font_6x13_t_cyrillic);
     // Inconsolata has no €; borrow it from 10x20 rather than print `?`.
     let inr24 =
         || face!(26, 34; u8g2_font_inr24_mf, u8g2_font_inr24_t_cyrillic, u8g2_font_10x20_te);
@@ -477,12 +477,32 @@ struct Layout {
     height: i32,
 }
 
-const QUOTE_W: i32 = 14;
+const QUOTE_W: i32 = 10;
 
 fn layout(blocks: &[Block], tier: &Tier, width: i32) -> Layout {
     let body = &tier.body;
-    let indent_w = body.width("    ");
-    let marker_w = body.width("00. ");
+    // Margins are kept to what separates things and no more: a nesting level
+    // is two characters, a bullet or checkbox is followed by one space, and a
+    // number column is as wide as its list's longest number.
+    let indent_w = body.width("  ");
+    let space_w = body.width(" ");
+    let bullet_s = (body.line_h / 4).max(4);
+    let check_s = (body.ascent - 2).max(8);
+    let mut widest_number: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+    for b in blocks {
+        if let Kind::Item(Marker::Number(n)) = b.kind {
+            let w = widest_number.entry(b.list).or_default();
+            *w = (*w).max(n as u32);
+        }
+    }
+    let marker_w = |b: &Block| match b.kind {
+        Kind::Item(Marker::Bullet) => 2 + bullet_s + space_w,
+        Kind::Item(Marker::Task(_)) => 1 + check_s + space_w,
+        Kind::Item(Marker::Number(_)) => {
+            body.width(&format!("{}.", widest_number.get(&b.list).copied().unwrap_or(9))) + space_w
+        }
+        _ => 0,
+    };
     let mut ops: Vec<(i32, Op)> = Vec::new();
     let mut y = 0i32;
     let mut prev: Option<&Block> = None;
@@ -500,8 +520,8 @@ fn layout(blocks: &[Block], tier: &Tier, width: i32) -> Layout {
                 0
             }
             (Some((Kind::Code, ..)), Kind::Code) => 0,
-            (Some(_), Kind::Heading(_)) => body.line_h * 2 / 3,
-            _ => body.line_h / 2,
+            (Some(_), Kind::Heading(_)) => body.line_h / 2,
+            _ => body.line_h / 3,
         };
         prev = Some(b);
 
@@ -516,7 +536,7 @@ fn layout(blocks: &[Block], tier: &Tier, width: i32) -> Layout {
         };
 
         if b.kind == Kind::Rule {
-            let mid = y + body.line_h / 2;
+            let mid = y + body.line_h / 3;
             let mut x = left;
             while x < width {
                 ops.push((
@@ -528,14 +548,14 @@ fn layout(blocks: &[Block], tier: &Tier, width: i32) -> Layout {
                 ));
                 x += 12;
             }
-            y += body.line_h;
+            y += body.line_h * 2 / 3;
         } else {
             let text_left = match b.kind {
-                Kind::Item(_) => left + marker_w,
-                Kind::Code => left + 6,
+                Kind::Item(_) => left + marker_w(b),
+                Kind::Code => left + 4,
                 _ => left,
             };
-            let avail = (width - text_left - if b.kind == Kind::Code { 6 } else { 0 }).max(1);
+            let avail = (width - text_left - if b.kind == Kind::Code { 4 } else { 0 }).max(1);
             let lines = wrap(&b.spans, face, avail, b.kind == Kind::Code);
 
             if let Kind::Item(m) = b.kind {
@@ -543,7 +563,7 @@ fn layout(blocks: &[Block], tier: &Tier, width: i32) -> Layout {
                 let bottom = top + face.line_h;
                 match m {
                     Marker::Bullet => {
-                        let s = (face.line_h / 4).max(4);
+                        let s = bullet_s;
                         let cy = top + face.ascent - face.ascent / 3;
                         ops.push((
                             bottom,
@@ -565,7 +585,7 @@ fn layout(blocks: &[Block], tier: &Tier, width: i32) -> Layout {
                         },
                     )),
                     Marker::Task(done) => {
-                        let s = (face.ascent - 2).max(8);
+                        let s = check_s;
                         ops.push((
                             bottom,
                             Op::Check {
@@ -647,13 +667,13 @@ fn layout(blocks: &[Block], tier: &Tier, width: i32) -> Layout {
 
             if b.kind == Kind::Heading(1) {
                 ops.push((
-                    y + 4,
+                    y + 3,
                     Op::Fill {
-                        rect: Rect::new(left, y + 1, (width - left) as u32, 3),
+                        rect: Rect::new(left, y + 1, (width - left) as u32, 2),
                         color: C::Red,
                     },
                 ));
-                y += 4;
+                y += 3;
             }
         }
 
@@ -800,9 +820,27 @@ fn draw_memo(c: &mut Canvas, note: &Note) {
         return;
     }
 
-    let blocks = parse(&note.markdown);
+    draw_markdown(c, &note.markdown, Rect::new(x0, top, width as u32, avail.max(0) as u32), 0);
+}
+
+/// `(done, total)` over the note's task-list items — the desk screen's
+/// progress count.
+pub(crate) fn task_counts(markdown: &str) -> (usize, usize) {
+    parse(markdown).iter().fold((0, 0), |(done, total), b| match b.kind {
+        Kind::Item(Marker::Task(d)) => (done + d as usize, total + 1),
+        _ => (done, total),
+    })
+}
+
+/// Lay `markdown` out in `area` at the largest type size that holds it, or
+/// cut it at the last whole line with a `MORE IN EDITOR` tag. Sizes above
+/// `largest` (an index into the tiers, 0 = display size) are skipped — a
+/// narrow column wraps every line at display size.
+pub(crate) fn draw_markdown(c: &mut Canvas, markdown: &str, area: Rect, largest: usize) {
+    let (x0, top, width, avail) = (area.x, area.y, area.w as i32, area.h as i32);
+    let blocks = parse(markdown);
     let tiers = tiers();
-    let (tier, lay) = tiers
+    let (tier, lay) = tiers[largest.min(tiers.len() - 1)..]
         .iter()
         .map(|t| (t, layout(&blocks, t, width)))
         .find(|(_, l)| l.height <= avail)
@@ -876,7 +914,7 @@ fn draw_memo(c: &mut Canvas, note: &Note) {
 
     if lay.height > avail {
         let w = text_width(&f_small_bold(), tag) + 10;
-        let x = panel.right() - pad - w as i32;
+        let x = area.right() - w as i32;
         let y = top + avail - tag_h;
         c.fill_rect(Rect::new(x, y, w, tag_h as u32), C::Red);
         draw_text(
