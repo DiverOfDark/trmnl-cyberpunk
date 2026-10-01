@@ -119,12 +119,12 @@ pub(crate) fn text_width(font: &FontRenderer, text: &str) -> u32 {
 
 // ── Top-level entry point ──────────────────────────────────────────────────
 
-pub fn render(data: &DashData, battery: u8, rssi: i32) -> anyhow::Result<Vec<u8>> {
+pub fn render(data: &DashData, unit: &str, battery: u8, rssi: i32) -> anyhow::Result<Vec<u8>> {
     let mut c = Canvas::new(crate::render::W, crate::render::H);
     c.fill(C::White);
 
     draw_registration_marks(&mut c);
-    draw_header(&mut c, data);
+    draw_header(&mut c, data, unit);
     draw_header_meta(&mut c, battery, rssi);
     draw_body(&mut c, data);
     draw_footer(&mut c, data);
@@ -159,17 +159,98 @@ pub(crate) fn draw_registration_marks(c: &mut Canvas) {
 
 pub(crate) const HDR_H: u32 = 44;
 
-pub(crate) fn draw_header(c: &mut Canvas, data: &DashData) {
+/// Widest the unit name may get. Past this the hatch (and the motto riding
+/// on it) would be squeezed out, so longer names step down a size, then get
+/// cut.
+const UNIT_NAME_MAX_W: u32 = 200;
+
+/// The unit name as it fits the header tab: the font, whether to
+/// double-strike it (the Cyrillic faces have no bold cut), and the text —
+/// cut with `..` if even the smallest face is too wide.
+struct UnitName {
+    font: FontRenderer,
+    bold: bool,
+    text: String,
+    width: u32,
+}
+
+/// Bold Helvetica for Latin names, largest first; the Cyrillic-capable
+/// monospace faces after it, which also catch anything else Helvetica's
+/// Latin-1 set lacks.
+fn unit_name_faces() -> [(FontRenderer, bool); 6] {
+    use u8g2_fonts::fonts::*;
+    [
+        (FontRenderer::new::<u8g2_font_helvB24_te>(), false),
+        (FontRenderer::new::<u8g2_font_helvB18_te>(), false),
+        (FontRenderer::new::<u8g2_font_helvB14_te>(), false),
+        (FontRenderer::new::<u8g2_font_inr24_t_cyrillic>(), true),
+        (FontRenderer::new::<u8g2_font_10x20_t_cyrillic>(), true),
+        (FontRenderer::new::<u8g2_font_9x15_t_cyrillic>(), true),
+    ]
+}
+
+fn fit_unit_name(name: &str) -> UnitName {
+    let name = if name.trim().is_empty() { "TRMNL" } else { name.trim() };
+    let width = |font: &FontRenderer, text: &str, bold: bool| -> Option<u32> {
+        font.get_rendered_dimensions(text, Point::zero(), VerticalPosition::Baseline)
+            .ok()
+            .map(|d| d.advance.x.max(0) as u32 + bold as u32)
+    };
+    // If nothing fits whole, cut the name down in the smallest face of the
+    // first family that can draw every glyph — a Latin name stays in
+    // Helvetica rather than dropping to the monospace faces. Glyphs no face
+    // has (emoji) print as `?`.
+    let mut fallback = None;
+    for (font, bold) in unit_name_faces() {
+        match width(&font, name, bold) {
+            Some(w) if w <= UNIT_NAME_MAX_W => {
+                return UnitName { font, bold, text: name.to_string(), width: w };
+            }
+            Some(_) if fallback.as_ref().map_or(true, |&(_, b)| b == bold) => {
+                fallback = Some((font, bold));
+            }
+            _ => {}
+        }
+    }
+    let (font, bold) = fallback.unwrap_or_else(|| {
+        let [.., last] = unit_name_faces();
+        last
+    });
+    let mut chars: Vec<char> = name
+        .chars()
+        .map(|ch| if width(&font, &ch.to_string(), false).is_some() { ch } else { '?' })
+        .collect();
+    loop {
+        let text: String = chars.iter().collect::<String>().trim_end().to_string();
+        let text = if chars.len() < name.chars().count() { format!("{text}..") } else { text };
+        let w = width(&font, &text, bold).unwrap_or(0);
+        if w <= UNIT_NAME_MAX_W || chars.is_empty() {
+            return UnitName { font, bold, text, width: w };
+        }
+        chars.pop();
+    }
+}
+
+pub(crate) fn draw_header(c: &mut Canvas, data: &DashData, unit: &str) {
     // Bottom 3px black border below the whole header
     c.fill_rect(Rect::new(0, HDR_H as i32 - 3, crate::render::W, 3), C::Black);
 
     // ── Left tab: black parallelogram with 14px right slant ──
-    // Width must clear the slanted right edge so the bold "TRMNL-01" doesn't
-    // get clipped: text right-edge ≤ tab_width - slant.
+    // Width must clear the slanted right edge so the unit name doesn't get
+    // clipped: text right-edge ≤ tab_width - slant.
     let unit_baseline = 16;
-    let name_baseline = 32;
+    let name = fit_unit_name(unit);
+    // Centre the name's cap height in the tab, whatever face it landed in.
+    let cap_h = name
+        .font
+        .get_rendered_dimensions("H", Point::zero(), VerticalPosition::Baseline)
+        .ok()
+        .and_then(|d| d.bounding_box)
+        .map(|b| b.size.height as i32)
+        .unwrap_or(17);
+    let name_baseline = (HDR_H as i32 - 3 + cap_h) / 2;
     let unit_w = text_width(&f_small(), "UNIT");
-    let name_w = text_width(&f_huge_bold(), "TRMNL-01");
+    let name_w = name.width;
     let left_pad = 12i32;
     let inner_gap = 8i32;
     let slant = 14u32;
@@ -177,15 +258,11 @@ pub(crate) fn draw_header(c: &mut Canvas, data: &DashData) {
     c.fill_left_parallelogram(0, 0, left_w, HDR_H - 3, slant, C::Black);
 
     draw_text(c, &f_small(), "UNIT", left_pad, unit_baseline, C::White, Align::Left);
-    draw_text(
-        c,
-        &f_huge_bold(),
-        "TRMNL-01",
-        left_pad + unit_w as i32 + inner_gap,
-        name_baseline,
-        C::White,
-        Align::Left,
-    );
+    let name_x = left_pad + unit_w as i32 + inner_gap;
+    draw_text(c, &name.font, &name.text, name_x, name_baseline, C::White, Align::Left);
+    if name.bold {
+        draw_text(c, &name.font, &name.text, name_x + 1, name_baseline, C::White, Align::Left);
+    }
 
     // ── Center: hatched stripe ──
     let right_block_w = 200u32;
@@ -1229,4 +1306,46 @@ pub(crate) fn draw_footer(c: &mut Canvas, data: &DashData) {
         C::White,
         Align::Right,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_latin_name_keeps_the_big_face() {
+        let n = fit_unit_name("Kitchen");
+        assert_eq!(n.text, "Kitchen");
+        assert!(!n.bold);
+        assert!(n.width <= UNIT_NAME_MAX_W);
+    }
+
+    #[test]
+    fn blank_name_reads_trmnl() {
+        assert_eq!(fit_unit_name("  ").text, "TRMNL");
+    }
+
+    #[test]
+    fn cyrillic_name_falls_to_a_cyrillic_face() {
+        let n = fit_unit_name("Кухня");
+        assert_eq!(n.text, "Кухня");
+        assert!(n.bold);
+    }
+
+    #[test]
+    fn overlong_name_is_cut_to_fit() {
+        let n = fit_unit_name("The Very Long Living Room Panel By The Window");
+        assert!(n.text.ends_with(".."), "{}", n.text);
+        assert!(!n.bold, "a Latin name stays in Helvetica");
+        assert!(n.width <= UNIT_NAME_MAX_W);
+        let n = fit_unit_name("Очень длинное название панели");
+        assert!(n.text.ends_with(".."), "{}", n.text);
+        assert!(n.width <= UNIT_NAME_MAX_W);
+    }
+
+    #[test]
+    fn unknown_glyphs_print_as_question_marks() {
+        let n = fit_unit_name("Desk 🖥");
+        assert_eq!(n.text, "Desk ?");
+    }
 }

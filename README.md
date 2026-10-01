@@ -15,10 +15,11 @@ The server renders the dashboard pixel-by-pixel in Rust (`embedded-graphics` + u
 ## Features
 
 - Full TRMNL BYOS protocol — `/api/setup`, `/api/display`, `/api/log`
-- Battery % and RSSI from the device are shown in the dashboard header
+- The device's name (set on `/devices`), battery % and RSSI are shown in the header
 - 4-bit indexed PNG output: every pixel is exactly one of the six panel inks (no dithering, no antialiasing) so the panel renders what we drew
 - Pluggable upstreams: Prometheus + Alertmanager, Nextcloud CalDAV, ActualBudget, Open-Meteo, [trackhound](https://github.com/DiverOfDark/trackhound). Mock fallbacks for everything when env vars are blank
 - Memo screen: write markdown in a WYSIWYG web editor at `/`; it autosaves to disk and the device shows it on its next wake-up
+- Multiple devices: `/devices` lists every panel with its last battery, signal, firmware and check-in time, and assigns each one either the dashboard or the memo
 - Norse-mythology mock hostnames, multi-day weather, calendar agenda, budget categories, alert feed
 
 ### Dashboard panels
@@ -73,7 +74,7 @@ curl http://localhost:8080/refresh
 | `RUST_LOG` | `trmnl_cyberpunk=info` | Log level |
 | `LOCAL_MODE` | _(unset)_ | If set, never fetch upstreams — serve mock data only |
 | `RENDER_TO` | _(unset)_ | If set to a path, render one PNG with mock data, write it, and exit |
-| `DATA_DIR` | `./data` (`/data` in the image) | Where the memo is stored (`note.md`). Mount a volume here |
+| `DATA_DIR` | `./data` (`/data` in the image) | Where the memo (`note.md`) and device settings (`devices.json`) are stored. Mount a volume here |
 | `FIRMWARE_UPDATE` | _(on)_ | Set to `false` to stop offering the bundled firmware as an OTA update |
 | `FIRMWARE_MODEL` | `reterminal_e1002` | Device `Model` header the bundled firmware is offered to |
 | `FIRMWARE_DIR` | `/app/firmware` | Directory with `firmware.bin` + `version.txt` |
@@ -105,9 +106,17 @@ Classification matches the Actual category *group* name against `ACTUALBUDGET_FI
 
 Open the server's root URL (`/`) in a browser and write. The editor is WYSIWYG (Toast UI, loaded from its CDN) and saves the markdown on every pause in typing — there is no save button. Beside it (or above, on narrower windows) is the panel itself: the exact PNG the device will download, at its native 800×480 with no smoothing, refreshed after every save. A toggle switches the preview to the dashboard. The REST API is documented at `/swagger`. The note is written to `$DATA_DIR/note.md`, so it survives restarts and can be edited with plain tools too.
 
-While a memo exists, the device alternates between the dashboard and the memo on each wake-up. A fresh edit jumps the queue: the next wake-up shows the memo regardless of whose turn it was. Clear the memo to drop the screen from the rotation.
+Which devices show the memo is set per device on the devices page (below); a device assigned to it shows the memo on every wake-up, and its empty state while there is none.
 
 The memo is fitted, not scrolled. It's set in the largest of five type sizes that holds the whole note, from Inconsolata 24 for a few lines down to 6×13 for a page of text; anything longer is cut at the last whole line with a red `MORE IN EDITOR` tag. Headings, bold, emphasis (blue), strikethrough, inline and block code, quotes, rules, links, bullet/numbered lists and task lists render. Tables are drawn one row per line. Latin, € and Cyrillic are covered; typographic dashes and quotes fold to ASCII, and other glyphs (emoji) print as `?`.
+
+### Devices
+
+`/devices` (linked from the editor header) shows one card per panel that has polled the server: name, MAC, model, when it last checked in (ONLINE / LATE / OFFLINE against its wake interval), which screen it was handed, battery % and voltage, WiFi RSSI, firmware and wake interval. The page reloads every 15 seconds.
+
+Each card picks the device's screen: **DASHBOARD** (where a new device starts) or **MEMO** (its empty state included while there is no memo). The name is drawn in the panel's top-left tab (`TRMNL` while unnamed): bold Helvetica for Latin, a Cyrillic face otherwise, stepping down a size and then cut with `..` if it's too long. Names and assignments apply on the device's next wake-up. ✕ forgets a device; it reappears with default settings if it polls again.
+
+Everything is stored in `$DATA_DIR/devices.json` — settings plus each device's last status, so the list isn't blank after a restart. It's a plain JSON array and can be edited by hand while the server is stopped. The device-less previews (`/dashboard.png`, `/note.png`) borrow the name and readings of the device that polled last.
 
 ---
 
@@ -143,22 +152,23 @@ trmnlApiKey: "your-secret-key"
 image:
   tag: "main"                          # or a semver tag like "0.1.0"
 persistence:
-  enabled: true                        # PVC for the memo (off by default)
+  enabled: true                        # PVC for memo + device settings (off by default)
   storageClass: ceph-filesystem
   accessMode: ReadWriteMany            # RWO switches to Recreate strategy
   size: 64Mi
 ```
 
-Without `persistence.enabled` the memo lives in an `emptyDir` and is lost when the pod is replaced. With a ReadWriteOnce volume the deployment uses the `Recreate` strategy, since the volume can't attach to the new pod while the old one holds it; ReadWriteMany keeps rolling updates. The PVC carries `helm.sh/resource-policy: keep`, so uninstalling the release doesn't delete the memo.
+Without `persistence.enabled` the memo and device settings live in an `emptyDir` and are lost when the pod is replaced. With a ReadWriteOnce volume the deployment uses the `Recreate` strategy, since the volume can't attach to the new pod while the old one holds it; ReadWriteMany keeps rolling updates. The PVC carries `helm.sh/resource-policy: keep`, so uninstalling the release doesn't delete the memo or device settings.
 
 ---
 
 ## Render pipeline
 
 ```
-Device  →  GET /api/display  →  stores battery + rssi
-                                returns dashboard PNG URL
-                                  (BASE_URL/dashboard/{epoch})
+Device  →  GET /api/display  →  records status in devices.json
+                                picks the screen from the device's mode
+                                returns its PNG URL
+                                  (BASE_URL/{dashboard|note}/{device}/{epoch})
 
 Per-request render (every device fetch):
   1. clone the latest fetched data
@@ -207,10 +217,13 @@ To add a real data source, extend `Sources::fetch` in `src/fetch.rs`. The mock d
 | `GET` | `/dashboard/{device}/{epoch}` | URL handed to each device: header shows that device's battery/RSSI (`{device}` = MAC hex) |
 | `GET` | `/note.png` | Memo screen, rendered fresh on every request |
 | `GET` | `/note/{epoch}` | Same handler; `{epoch}` is a cache-buster |
-| `GET` | `/note/{device}/{epoch}` | Per-device memo URL; what `/api/display` points at on memo turns |
+| `GET` | `/note/{device}/{epoch}` | Per-device memo URL; what `/api/display` points at for devices assigned the memo |
 | `GET` | `/firmware/{file}` | Bundled OTA firmware image |
 | `GET` | `/` | WYSIWYG memo editor |
-| `GET` | `/swagger` | Swagger UI for the memo, screen and ops endpoints (`/openapi.json`) |
+| `GET` | `/devices` | Device list: last status and screen assignment |
+| `GET` | `/api/devices` | Every registered device with its settings and last status |
+| `PATCH` / `DELETE` | `/api/devices/{mac}` | Rename / reassign a device (`{"name": …, "mode": "dashboard"\|"note"}`) / forget it |
+| `GET` | `/swagger` | Swagger UI for the memo, device, screen and ops endpoints (`/openapi.json`) |
 | `GET` / `PUT` | `/api/note` | Read the memo as JSON / replace it with the raw markdown body |
 | `GET` | `/refresh` | Force an immediate upstream re-fetch |
 | `GET` | `/health` | Health check |

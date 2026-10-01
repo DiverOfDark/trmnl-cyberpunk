@@ -1,5 +1,6 @@
 mod dashboard;
 mod data;
+mod devices;
 mod fetch;
 mod firmware;
 mod note;
@@ -7,7 +8,6 @@ mod note_screen;
 mod render;
 mod windows_tz;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,28 +28,15 @@ use utoipa::{OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 
 use data::DashData;
+use devices::{device_key, Device, DevicePatch, DeviceStore, Mode};
 use fetch::Sources;
 use firmware::Firmware;
-use note::{NoteStore, Playlist, Screen};
+use note::{NoteStore, Screen};
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
-#[derive(Default, Clone, Serialize)]
-struct DeviceState {
-    battery_pct: u8,
-    rssi: i32,
-    firmware: String,
-    last_seen: String,
-    /// Unix time of the last poll; picks the device device-less URLs preview.
-    #[serde(skip)]
-    seen_at: i64,
-}
-
 #[derive(Clone)]
 struct AppState {
-    /// Per-device telemetry, keyed by `device_key` (MAC hex), so each device
-    /// renders its own battery/RSSI in the header.
-    devices: Arc<RwLock<HashMap<String, DeviceState>>>,
     data: Arc<RwLock<DashData>>,
     sources: Arc<Sources>,
     /// Serializes upstream-fetch runs so a manual `/refresh` landing mid-cycle
@@ -57,7 +44,8 @@ struct AppState {
     fetch_lock: Arc<tokio::sync::Mutex<()>>,
     local_mode: bool,
     note: Arc<NoteStore>,
-    playlist: Arc<std::sync::Mutex<Playlist>>,
+    /// Registered panels: settings, screen assignment and last status.
+    devices: Arc<DeviceStore>,
     /// Patched firmware build offered to the device as an OTA update.
     firmware: Option<Arc<Firmware>>,
 }
@@ -67,11 +55,6 @@ struct AppState {
 fn mac_short_id(mac: &str) -> String {
     let hex: String = mac.chars().filter(|c| c.is_ascii_hexdigit()).collect();
     hex[hex.len().saturating_sub(6)..].to_uppercase()
-}
-
-/// Lowercase MAC hex (`ac276ea69d18`): stable per device and URL-safe.
-fn device_key(mac: &str) -> String {
-    mac.chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>().to_lowercase()
 }
 
 fn base_url() -> String {
@@ -169,27 +152,22 @@ async fn refresh_loop(state: AppState) {
     }
 }
 
-/// Telemetry for the header: the named device, or — for device-less URLs like
-/// `/dashboard.png` — whichever device polled most recently.
-fn pick_device(devices: &HashMap<String, DeviceState>, key: Option<&str>) -> DeviceState {
-    match key {
-        Some(k) => devices.get(k).cloned().unwrap_or_default(),
-        None => devices.values().max_by_key(|d| d.seen_at).cloned().unwrap_or_default(),
-    }
-}
-
 /// Render one screen from the current `state.data` (and memo) to a PNG for
-/// `device` (see `pick_device`). Called per-request from `serve_screen`, and
+/// `device` — or, for device-less URLs like `/dashboard.png`, whichever
+/// device polled most recently. Called per-request from `serve_screen`, and
 /// once at the end of `RENDER_TO=...` mode.
 async fn render_now(state: &AppState, screen: Screen, device: Option<&str>) -> anyhow::Result<Vec<u8>> {
     let mut data = state.data.read().await.clone();
     data.refresh_clock();
-    let device = pick_device(&*state.devices.read().await, device);
+    let device = state.devices.get_or_latest(device).await;
+    let battery = device.as_ref().and_then(|d| d.battery_pct).unwrap_or(0);
+    let rssi = device.as_ref().and_then(|d| d.rssi).unwrap_or(0);
+    let unit = device.map(|d| d.name).unwrap_or_default();
     let note = state.note.get().await;
 
     let bytes = tokio::task::spawn_blocking(move || match screen {
-        Screen::Dashboard => dashboard::render(&data, device.battery_pct, device.rssi),
-        Screen::Note => note_screen::render(&data, &note, device.battery_pct, device.rssi),
+        Screen::Dashboard => dashboard::render(&data, &unit, battery, rssi),
+        Screen::Note => note_screen::render(&data, &note, &unit, battery, rssi),
     })
     .await??;
 
@@ -198,8 +176,14 @@ async fn render_now(state: &AppState, screen: Screen, device: Option<&str>) -> a
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-async fn api_setup(State(_): State<AppState>, device: DeviceInfo) -> impl IntoResponse {
+async fn api_setup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    device: DeviceInfo,
+) -> impl IntoResponse {
     info!(mac = %device.mac_address, fw = ?device.firmware_version, "device setup");
+    let model = headers.get("Model").and_then(|v| v.to_str().ok());
+    state.devices.register(&device, model).await;
     let api_key = std::env::var("TRMNL_API_KEY").unwrap_or_else(|_| "cyberpunk-byos".into());
     let epoch = chrono::Utc::now().timestamp();
     Json(json!({
@@ -219,22 +203,12 @@ async fn api_display(
     info!(mac = %device.mac_address, model = ?model, fw = ?device.firmware_version, bat = ?device.battery_percentage(), rssi = ?device.rssi, "device poll");
 
     let key = device_key(&device.mac_address);
-    {
-        let mut devices = state.devices.write().await;
-        let ds = devices.entry(key.clone()).or_default();
-        ds.seen_at = chrono::Utc::now().timestamp();
-        ds.battery_pct = device.battery_percentage().unwrap_or(0);
-        ds.rssi = device.rssi.unwrap_or(0);
-        ds.firmware = device.firmware_version.clone().unwrap_or_default();
-        ds.last_seen = chrono::Local::now().format("%H:%M").to_string();
-    }
 
     // No fetch here — the firmware downloads the screen's URL next, and that
     // handler renders from the cache. Stamp the URL with the current
     // timestamp so the firmware's 24h filename-dedupe sees a new key on
     // every poll and re-downloads.
-    let has_note = !state.note.get().await.is_empty();
-    let screen = state.playlist.lock().unwrap().next(has_note);
+    let screen = state.devices.checkin(&device, model).await;
     let epoch = chrono::Utc::now().timestamp();
     let mut resp = build_display_response(&key, epoch, screen);
     if let Some(fw) = &state.firmware {
@@ -378,7 +352,7 @@ async fn get_note(State(state): State<AppState>) -> Json<NoteDto> {
 
 /// Replace the memo. The body is the raw markdown, not JSON, so it's
 /// curl-friendly; the editor PUTs the full text on every pause in typing.
-/// An empty body clears the memo and drops its screen from the rotation.
+/// An empty body clears the memo; devices assigned to it show its empty state.
 #[utoipa::path(
     put,
     path = "/api/note",
@@ -391,12 +365,85 @@ async fn get_note(State(state): State<AppState>) -> Json<NoteDto> {
 )]
 async fn put_note(State(state): State<AppState>, body: String) -> Response {
     match state.note.set(body).await {
-        Ok(note) => {
-            state.playlist.lock().unwrap().note_edited();
-            Json(NoteSaved { updated_at: note.updated_at }).into_response()
-        }
+        Ok(note) => Json(NoteSaved { updated_at: note.updated_at }).into_response(),
         Err(e) => {
             warn!("saving memo failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "save failed").into_response()
+        }
+    }
+}
+
+// ── Devices ───────────────────────────────────────────────────────────────────
+
+async fn devices_page() -> Html<&'static str> {
+    Html(include_str!("devices.html"))
+}
+
+#[derive(Serialize, ToSchema)]
+struct DevicesDto {
+    /// The refresh interval handed to devices, seconds — a device not seen
+    /// for well over this is probably asleep for good or offline.
+    refresh_secs: u32,
+    devices: Vec<Device>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/devices",
+    responses((status = 200, description = "Every device that has polled, with its last status", body = DevicesDto)),
+    tag = "devices",
+)]
+async fn list_devices(State(state): State<AppState>) -> Json<DevicesDto> {
+    Json(DevicesDto { refresh_secs: refresh_secs(), devices: state.devices.list().await })
+}
+
+/// Rename a device or change which screen it shows. Takes effect on the
+/// device's next wake-up.
+#[utoipa::path(
+    patch,
+    path = "/api/devices/{mac}",
+    params(("mac" = String, Path, description = "Device MAC address")),
+    request_body = DevicePatch,
+    responses(
+        (status = 200, description = "Updated", body = Device),
+        (status = 404, description = "No device with that MAC has polled"),
+        (status = 500, description = "Writing to DATA_DIR failed"),
+    ),
+    tag = "devices",
+)]
+async fn patch_device(
+    State(state): State<AppState>,
+    Path(mac): Path<String>,
+    Json(patch): Json<DevicePatch>,
+) -> Response {
+    match state.devices.update(&mac, patch).await {
+        Ok(Some(device)) => Json(device).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "unknown device").into_response(),
+        Err(e) => {
+            warn!("saving devices failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "save failed").into_response()
+        }
+    }
+}
+
+/// Forget a device. If it polls again it comes back with default settings.
+#[utoipa::path(
+    delete,
+    path = "/api/devices/{mac}",
+    params(("mac" = String, Path, description = "Device MAC address")),
+    responses(
+        (status = 204, description = "Removed"),
+        (status = 404, description = "No device with that MAC"),
+        (status = 500, description = "Writing to DATA_DIR failed"),
+    ),
+    tag = "devices",
+)]
+async fn delete_device(State(state): State<AppState>, Path(mac): Path<String>) -> Response {
+    match state.devices.remove(&mac).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "unknown device").into_response(),
+        Err(e) => {
+            warn!("saving devices failed: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, "save failed").into_response()
         }
     }
@@ -409,10 +456,11 @@ async fn put_note(State(state): State<AppState>, body: String) -> Response {
         description = "BYOS server for TRMNL e-ink panels. The device-protocol endpoints (`/api/setup`, `/api/display`, `/api/log`) and the cache-busted screen URLs (`/dashboard/{epoch}`, `/note/{epoch}`) are reachable too but are driven by the firmware, so they aren't part of this schema.",
         version = env!("CARGO_PKG_VERSION"),
     ),
-    paths(get_note, put_note, serve_png, serve_note, force_refresh, health),
-    components(schemas(NoteDto, NoteSaved)),
+    paths(get_note, put_note, list_devices, patch_device, delete_device, serve_png, serve_note, force_refresh, health),
+    components(schemas(NoteDto, NoteSaved, DevicesDto, Device, DevicePatch, Mode, Screen)),
     tags(
         (name = "memo", description = "Read and write the memo screen's markdown"),
+        (name = "devices", description = "Registered panels, their last status, and which screen each shows"),
         (name = "screens", description = "Rendered 800x480 panel images"),
         (name = "ops", description = "Refresh and health"),
     ),
@@ -461,13 +509,12 @@ async fn main() {
     let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".into());
 
     let state = AppState {
-        devices: Arc::new(RwLock::new(HashMap::new())),
         data: Arc::new(RwLock::new(initial_data)),
         sources: Arc::new(Sources::from_env()),
         fetch_lock: Arc::new(tokio::sync::Mutex::new(())),
         local_mode,
         note: Arc::new(NoteStore::open(&data_dir).await),
-        playlist: Arc::new(std::sync::Mutex::new(Playlist::default())),
+        devices: Arc::new(DeviceStore::open(&data_dir).await),
         firmware: if render_to.is_some() { None } else { Firmware::from_env().map(Arc::new) },
     };
 
@@ -491,6 +538,9 @@ async fn main() {
         .route("/health", get(health))
         .route("/", get(editor))
         .route("/api/note", get(get_note).put(put_note))
+        .route("/devices", get(devices_page))
+        .route("/api/devices", get(list_devices))
+        .route("/api/devices/{mac}", axum::routing::patch(patch_device).delete(delete_device))
         .merge(SwaggerUi::new("/swagger").url("/openapi.json", ApiDoc::openapi()))
         .with_state(state.clone());
 
@@ -536,28 +586,7 @@ async fn main() {
     info!("Refreshing upstream data every {}s", fetch_interval_secs());
     info!("Image    →  http://{bound}/dashboard.png");
     info!("Memo     →  http://{bound}/  (stored in {data_dir}/note.md)");
+    info!("Devices  →  http://{bound}/devices  (stored in {data_dir}/devices.json)");
     info!("API docs →  http://{bound}/swagger");
     axum::serve(listener, app).await.expect("server error");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn seen(bat: u8, at: i64) -> DeviceState {
-        DeviceState { battery_pct: bat, seen_at: at, ..Default::default() }
-    }
-
-    #[test]
-    fn device_key_normalizes_mac() {
-        assert_eq!(device_key("AC:27:6E:A6:9D:18"), "ac276ea69d18");
-    }
-
-    #[test]
-    fn picks_named_device_or_most_recent() {
-        let devices = HashMap::from([("a".to_string(), seen(10, 100)), ("b".to_string(), seen(90, 200))]);
-        assert_eq!(pick_device(&devices, Some("a")).battery_pct, 10);
-        assert_eq!(pick_device(&devices, None).battery_pct, 90);
-        assert_eq!(pick_device(&devices, Some("unknown")).battery_pct, 0);
-    }
 }

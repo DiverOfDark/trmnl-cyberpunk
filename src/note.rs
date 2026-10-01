@@ -1,6 +1,5 @@
 //! The memo: one free-form markdown note written in the web editor,
-//! persisted to disk, and shown on the device as its own screen between
-//! dashboard frames.
+//! persisted to disk, and shown full-screen on the devices assigned to it.
 //!
 //! Storage is a single file (`$DATA_DIR/note.md`) so it survives restarts on
 //! a PVC and stays readable/editable with plain tools. The edit timestamp is
@@ -92,81 +91,18 @@ impl NoteStore {
     }
 }
 
-// ── Playlist ────────────────────────────────────────────────────────────────
+// ── Screen ──────────────────────────────────────────────────────────────────
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum Screen {
     Dashboard,
     Note,
 }
 
-/// Decides which screen the device gets on each poll. With a memo present
-/// the device alternates dashboard ↔ memo; with none it always gets the
-/// dashboard. A fresh edit jumps the queue so what you just wrote shows up
-/// on the very next wake rather than one cycle later.
-#[derive(Debug)]
-pub struct Playlist {
-    last: Screen,
-    note_unseen: bool,
-}
-
-impl Default for Playlist {
-    fn default() -> Self {
-        Self {
-            last: Screen::Dashboard,
-            note_unseen: false,
-        }
-    }
-}
-
-impl Playlist {
-    pub fn note_edited(&mut self) {
-        self.note_unseen = true;
-    }
-
-    pub fn next(&mut self, has_note: bool) -> Screen {
-        let screen = if !has_note {
-            Screen::Dashboard
-        } else if self.note_unseen || self.last == Screen::Dashboard {
-            Screen::Note
-        } else {
-            Screen::Dashboard
-        };
-        if screen == Screen::Note {
-            self.note_unseen = false;
-        }
-        self.last = screen;
-        screen
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn no_note_always_dashboard() {
-        let mut p = Playlist::default();
-        assert_eq!(p.next(false), Screen::Dashboard);
-        assert_eq!(p.next(false), Screen::Dashboard);
-    }
-
-    #[test]
-    fn note_alternates_with_dashboard() {
-        let mut p = Playlist::default();
-        assert_eq!(p.next(true), Screen::Note);
-        assert_eq!(p.next(true), Screen::Dashboard);
-        assert_eq!(p.next(true), Screen::Note);
-    }
-
-    #[test]
-    fn edit_jumps_the_queue() {
-        let mut p = Playlist::default();
-        assert_eq!(p.next(true), Screen::Note);
-        p.note_edited();
-        assert_eq!(p.next(true), Screen::Note);
-        assert_eq!(p.next(true), Screen::Dashboard);
-    }
 
     #[tokio::test]
     async fn store_round_trips_through_disk() {
