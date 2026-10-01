@@ -14,15 +14,19 @@ COPY src ./src
 RUN cargo build --release --bin trmnl-cyberpunk
 
 # ── Stage 2: Patched TRMNL firmware (OTA update for the device) ──────────────
-# See firmware/build.sh. The PlatformIO cache mount keeps the ESP32 toolchain
-# between builds; the layer only re-runs when firmware/ changes.
+# See firmware/build.sh. Layered for the CI layer cache (type=gha): the
+# upstream checkout + ESP32 toolchain/libs (~2.4 GB unpacked) depend only on
+# FIRMWARE_REF/FIRMWARE_ENV, so editing patches reuses them and only recompiles.
 FROM python:3.12-slim-bookworm AS firmware
 RUN apt-get update && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir platformio
+COPY firmware/FIRMWARE_REF firmware/FIRMWARE_ENV ./firmware/
+RUN git clone --quiet --depth 1 --branch "$(cat firmware/FIRMWARE_REF)" \
+        https://github.com/usetrmnl/trmnl-firmware /src \
+    && pio pkg install --project-dir /src --environment "$(cat firmware/FIRMWARE_ENV)"
 COPY firmware ./firmware
-RUN --mount=type=cache,target=/root/.platformio \
-    ./firmware/build.sh /out
+RUN FIRMWARE_SRC_DIR=/src ./firmware/build.sh /out
 
 # ── Stage 3: Runtime ──────────────────────────────────────────────────────────
 # Pixel-direct rendering: no browser, no fonts, no graphics libs needed.

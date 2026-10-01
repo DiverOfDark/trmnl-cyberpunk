@@ -3,7 +3,8 @@
 #
 #   firmware/build.sh <out-dir>
 #
-# Clones usetrmnl/trmnl-firmware at the ref in firmware/FIRMWARE_REF, applies
+# Clones usetrmnl/trmnl-firmware at the ref in firmware/FIRMWARE_REF (or reuses
+# FIRMWARE_SRC_DIR if it's already a checkout of that ref), applies
 # firmware/patches/*.patch, and builds the PlatformIO env in firmware/FIRMWARE_ENV.
 # Writes <out-dir>/firmware.bin (OTA app image) and <out-dir>/version.txt.
 #
@@ -20,8 +21,15 @@ src="${FIRMWARE_SRC_DIR:-$(mktemp -d)}"
 
 suffix="-cp.$(cat "$here/FIRMWARE_REF" "$here/FIRMWARE_ENV" "$here"/patches/*.patch | sha256sum | cut -c1-7)"
 
-rm -rf "$src"
-git clone --quiet --depth 1 --branch "$ref" https://github.com/usetrmnl/trmnl-firmware "$src"
+# Reuse an existing checkout of the same ref (the Dockerfile pre-clones it to
+# cache the toolchain download in its own layer); otherwise clone fresh.
+if [ "$(git -C "$src" describe --tags --exact-match 2>/dev/null)" = "$ref" ]; then
+  git -C "$src" reset --quiet --hard
+  git -C "$src" clean --quiet -fd
+else
+  rm -rf "$src"
+  git clone --quiet --depth 1 --branch "$ref" https://github.com/usetrmnl/trmnl-firmware "$src"
+fi
 git -C "$src" apply "$here"/patches/*.patch
 
 PLATFORMIO_BUILD_FLAGS="-DFW_VERSION_SUFFIX=\\\"$suffix\\\"" \
