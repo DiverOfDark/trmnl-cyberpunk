@@ -51,3 +51,7 @@ services:
       # trackhound base URL for parcel highlights — leave blank to disable.
       # See https://github.com/DiverOfDark/trackhound
       TRACKHOUND_BASE_URL: ""
+
+      # Offer the bundled patched firmware (see firmware/) to the device as
+      # an OTA update. "false" to disable.
+      FIRMWARE_UPDATE: "true"

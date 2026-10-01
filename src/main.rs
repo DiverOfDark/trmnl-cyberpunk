@@ -1,17 +1,19 @@
 mod dashboard;
 mod data;
 mod fetch;
+mod firmware;
 mod note;
 mod note_screen;
 mod render;
 mod windows_tz;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    extract::State,
-    http::{header, StatusCode},
+    extract::{Path, State},
+    http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
     Router,
@@ -27,6 +29,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use data::DashData;
 use fetch::Sources;
+use firmware::Firmware;
 use note::{NoteStore, Playlist, Screen};
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -37,11 +40,16 @@ struct DeviceState {
     rssi: i32,
     firmware: String,
     last_seen: String,
+    /// Unix time of the last poll; picks the device device-less URLs preview.
+    #[serde(skip)]
+    seen_at: i64,
 }
 
 #[derive(Clone)]
 struct AppState {
-    device_state: Arc<RwLock<DeviceState>>,
+    /// Per-device telemetry, keyed by `device_key` (MAC hex), so each device
+    /// renders its own battery/RSSI in the header.
+    devices: Arc<RwLock<HashMap<String, DeviceState>>>,
     data: Arc<RwLock<DashData>>,
     sources: Arc<Sources>,
     /// Serializes upstream-fetch runs so a manual `/refresh` landing mid-cycle
@@ -50,6 +58,8 @@ struct AppState {
     local_mode: bool,
     note: Arc<NoteStore>,
     playlist: Arc<std::sync::Mutex<Playlist>>,
+    /// Patched firmware build offered to the device as an OTA update.
+    firmware: Option<Arc<Firmware>>,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -57,6 +67,11 @@ struct AppState {
 fn mac_short_id(mac: &str) -> String {
     let hex: String = mac.chars().filter(|c| c.is_ascii_hexdigit()).collect();
     hex[hex.len().saturating_sub(6)..].to_uppercase()
+}
+
+/// Lowercase MAC hex (`ac276ea69d18`): stable per device and URL-safe.
+fn device_key(mac: &str) -> String {
+    mac.chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>().to_lowercase()
 }
 
 fn base_url() -> String {
@@ -93,19 +108,20 @@ fn dashboard_filename(epoch: i64) -> String {
 /// URL the firmware downloads. Goes through `/dashboard/{epoch}` rather than
 /// `/dashboard-{epoch}.png` because axum 0.8 doesn't allow a literal and a
 /// param in the same path segment.
-fn dashboard_url(epoch: i64) -> String {
-    format!("{}/dashboard/{epoch}", base_url())
+/// `{device}` picks whose battery/RSSI the header shows.
+fn dashboard_url(device: &str, epoch: i64) -> String {
+    format!("{}/dashboard/{device}/{epoch}", base_url())
 }
 
 /// Same cache-busting scheme as `dashboard_url`, for the memo screen.
-fn note_url(epoch: i64) -> String {
-    format!("{}/note/{epoch}", base_url())
+fn note_url(device: &str, epoch: i64) -> String {
+    format!("{}/note/{device}/{epoch}", base_url())
 }
 
-fn build_display_response(epoch: i64, screen: Screen) -> DisplayResponse {
+fn build_display_response(device: &str, epoch: i64, screen: Screen) -> DisplayResponse {
     let url = match screen {
-        Screen::Dashboard => dashboard_url(epoch),
-        Screen::Note => note_url(epoch),
+        Screen::Dashboard => dashboard_url(device, epoch),
+        Screen::Note => note_url(device, epoch),
     };
     DisplayResponse::new(url, dashboard_filename(epoch)).with_refresh_rate(refresh_secs())
 }
@@ -153,13 +169,22 @@ async fn refresh_loop(state: AppState) {
     }
 }
 
-/// Render one screen from the current `state.data` (and memo) to a PNG.
-/// Called per-request from `serve_png` / `serve_note`, and once at the end
-/// of `RENDER_TO=...` mode.
-async fn render_now(state: &AppState, screen: Screen) -> anyhow::Result<Vec<u8>> {
+/// Telemetry for the header: the named device, or — for device-less URLs like
+/// `/dashboard.png` — whichever device polled most recently.
+fn pick_device(devices: &HashMap<String, DeviceState>, key: Option<&str>) -> DeviceState {
+    match key {
+        Some(k) => devices.get(k).cloned().unwrap_or_default(),
+        None => devices.values().max_by_key(|d| d.seen_at).cloned().unwrap_or_default(),
+    }
+}
+
+/// Render one screen from the current `state.data` (and memo) to a PNG for
+/// `device` (see `pick_device`). Called per-request from `serve_screen`, and
+/// once at the end of `RENDER_TO=...` mode.
+async fn render_now(state: &AppState, screen: Screen, device: Option<&str>) -> anyhow::Result<Vec<u8>> {
     let mut data = state.data.read().await.clone();
     data.refresh_clock();
-    let device = state.device_state.read().await.clone();
+    let device = pick_device(&*state.devices.read().await, device);
     let note = state.note.get().await;
 
     let bytes = tokio::task::spawn_blocking(move || match screen {
@@ -180,16 +205,24 @@ async fn api_setup(State(_): State<AppState>, device: DeviceInfo) -> impl IntoRe
     Json(json!({
         "api_key":     api_key,
         "friendly_id": mac_short_id(&device.mac_address),
-        "image_url":   dashboard_url(epoch),
+        "image_url":   dashboard_url(&device_key(&device.mac_address), epoch),
         "message":     "TRMNL//CYBERPUNK — BYOS",
     }))
 }
 
-async fn api_display(State(state): State<AppState>, device: DeviceInfo) -> Json<DisplayResponse> {
-    info!(mac = %device.mac_address, bat = ?device.battery_percentage(), rssi = ?device.rssi, "device poll");
+async fn api_display(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    device: DeviceInfo,
+) -> Json<DisplayResponse> {
+    let model = headers.get("Model").and_then(|v| v.to_str().ok());
+    info!(mac = %device.mac_address, model = ?model, fw = ?device.firmware_version, bat = ?device.battery_percentage(), rssi = ?device.rssi, "device poll");
 
+    let key = device_key(&device.mac_address);
     {
-        let mut ds = state.device_state.write().await;
+        let mut devices = state.devices.write().await;
+        let ds = devices.entry(key.clone()).or_default();
+        ds.seen_at = chrono::Utc::now().timestamp();
         ds.battery_pct = device.battery_percentage().unwrap_or(0);
         ds.rssi = device.rssi.unwrap_or(0);
         ds.firmware = device.firmware_version.clone().unwrap_or_default();
@@ -203,7 +236,15 @@ async fn api_display(State(state): State<AppState>, device: DeviceInfo) -> Json<
     let has_note = !state.note.get().await.is_empty();
     let screen = state.playlist.lock().unwrap().next(has_note);
     let epoch = chrono::Utc::now().timestamp();
-    Json(build_display_response(epoch, screen))
+    let mut resp = build_display_response(&key, epoch, screen);
+    if let Some(fw) = &state.firmware {
+        if fw.should_offer(model, device.firmware_version.as_deref()) {
+            info!(from = ?device.firmware_version, to = %fw.version, "offering firmware update");
+            resp.update_firmware = true;
+            resp.firmware_url = Some(format!("{}{}", base_url(), fw.path()));
+        }
+    }
+    Json(resp)
 }
 
 async fn api_log(State(_): State<AppState>, device: DeviceInfo, body: String) -> StatusCode {
@@ -229,7 +270,7 @@ async fn serve_png(State(state): State<AppState>) -> Response {
     // device gets its PNG in milliseconds instead of waiting on upstreams.
     // Anything the refresher couldn't reach is drawn with a STALE marker, so
     // serving cached data never passes as current.
-    serve_screen(&state, Screen::Dashboard).await
+    serve_screen(&state, Screen::Dashboard, None).await
 }
 
 #[utoipa::path(
@@ -239,11 +280,27 @@ async fn serve_png(State(state): State<AppState>) -> Response {
     tag = "screens",
 )]
 async fn serve_note(State(state): State<AppState>) -> Response {
-    serve_screen(&state, Screen::Note).await
+    serve_screen(&state, Screen::Note, None).await
 }
 
-async fn serve_screen(state: &AppState, screen: Screen) -> Response {
-    match render_now(state, screen).await {
+/// Per-device screen URLs handed out by `/api/display`; `_epoch` is only the
+/// cache-buster.
+async fn serve_device_png(
+    State(state): State<AppState>,
+    Path((device, _epoch)): Path<(String, String)>,
+) -> Response {
+    serve_screen(&state, Screen::Dashboard, Some(&device)).await
+}
+
+async fn serve_device_note(
+    State(state): State<AppState>,
+    Path((device, _epoch)): Path<(String, String)>,
+) -> Response {
+    serve_screen(&state, Screen::Note, Some(&device)).await
+}
+
+async fn serve_screen(state: &AppState, screen: Screen, device: Option<&str>) -> Response {
+    match render_now(state, screen, device).await {
         Ok(bytes) => (
             StatusCode::OK,
             [
@@ -257,6 +314,20 @@ async fn serve_screen(state: &AppState, screen: Screen) -> Response {
             warn!("render failed: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, "render failed").into_response()
         }
+    }
+}
+
+/// OTA download. The version in the path is informational; whatever build is
+/// baked into the image gets served.
+async fn serve_firmware(State(state): State<AppState>) -> Response {
+    match &state.firmware {
+        Some(fw) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            fw.bytes.clone(),
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -390,13 +461,14 @@ async fn main() {
     let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".into());
 
     let state = AppState {
-        device_state: Arc::new(RwLock::new(DeviceState::default())),
+        devices: Arc::new(RwLock::new(HashMap::new())),
         data: Arc::new(RwLock::new(initial_data)),
         sources: Arc::new(Sources::from_env()),
         fetch_lock: Arc::new(tokio::sync::Mutex::new(())),
         local_mode,
         note: Arc::new(NoteStore::open(&data_dir).await),
         playlist: Arc::new(std::sync::Mutex::new(Playlist::default())),
+        firmware: if render_to.is_some() { None } else { Firmware::from_env().map(Arc::new) },
     };
 
     let app = Router::new()
@@ -409,8 +481,12 @@ async fn main() {
         // it and renders fresh either way. Slash-separated segments sidestep
         // axum-0.8's "no literals in a param segment" rule.
         .route("/dashboard/{epoch}", get(serve_png))
+        // Per-device URLs handed out by `/api/display` and `/api/setup`.
+        .route("/dashboard/{device}/{epoch}", get(serve_device_png))
         .route("/note.png", get(serve_note))
         .route("/note/{epoch}", get(serve_note))
+        .route("/note/{device}/{epoch}", get(serve_device_note))
+        .route("/firmware/{file}", get(serve_firmware))
         .route("/refresh", get(force_refresh))
         .route("/health", get(health))
         .route("/", get(editor))
@@ -423,7 +499,7 @@ async fn main() {
         // mode) then render directly.
         info!("rendering one frame to {path} (mock data)");
         refresh_data(&state).await;
-        let bytes = match render_now(&state, Screen::Dashboard).await {
+        let bytes = match render_now(&state, Screen::Dashboard, None).await {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("render failed: {e}");
@@ -462,4 +538,26 @@ async fn main() {
     info!("Memo     →  http://{bound}/  (stored in {data_dir}/note.md)");
     info!("API docs →  http://{bound}/swagger");
     axum::serve(listener, app).await.expect("server error");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seen(bat: u8, at: i64) -> DeviceState {
+        DeviceState { battery_pct: bat, seen_at: at, ..Default::default() }
+    }
+
+    #[test]
+    fn device_key_normalizes_mac() {
+        assert_eq!(device_key("AC:27:6E:A6:9D:18"), "ac276ea69d18");
+    }
+
+    #[test]
+    fn picks_named_device_or_most_recent() {
+        let devices = HashMap::from([("a".to_string(), seen(10, 100)), ("b".to_string(), seen(90, 200))]);
+        assert_eq!(pick_device(&devices, Some("a")).battery_pct, 10);
+        assert_eq!(pick_device(&devices, None).battery_pct, 90);
+        assert_eq!(pick_device(&devices, Some("unknown")).battery_pct, 0);
+    }
 }

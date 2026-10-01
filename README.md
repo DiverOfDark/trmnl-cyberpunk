@@ -74,6 +74,9 @@ curl http://localhost:8080/refresh
 | `LOCAL_MODE` | _(unset)_ | If set, never fetch upstreams — serve mock data only |
 | `RENDER_TO` | _(unset)_ | If set to a path, render one PNG with mock data, write it, and exit |
 | `DATA_DIR` | `./data` (`/data` in the image) | Where the memo is stored (`note.md`). Mount a volume here |
+| `FIRMWARE_UPDATE` | _(on)_ | Set to `false` to stop offering the bundled firmware as an OTA update |
+| `FIRMWARE_MODEL` | `reterminal_e1002` | Device `Model` header the bundled firmware is offered to |
+| `FIRMWARE_DIR` | `/app/firmware` | Directory with `firmware.bin` + `version.txt` |
 
 Upstream-specific env vars (leave blank to use the matching mock data) are documented in `docker-compose.yml`.
 
@@ -105,6 +108,20 @@ Open the server's root URL (`/`) in a browser and write. The editor is WYSIWYG (
 While a memo exists, the device alternates between the dashboard and the memo on each wake-up. A fresh edit jumps the queue: the next wake-up shows the memo regardless of whose turn it was. Clear the memo to drop the screen from the rotation.
 
 The memo is fitted, not scrolled. It's set in the largest of five type sizes that holds the whole note, from Inconsolata 24 for a few lines down to 6×13 for a page of text; anything longer is cut at the last whole line with a red `MORE IN EDITOR` tag. Headings, bold, emphasis (blue), strikethrough, inline and block code, quotes, rules, links, bullet/numbered lists and task lists render. Tables are drawn one row per line. Latin, € and Cyrillic are covered; typographic dashes and quotes fold to ASCII, and other glyphs (emoji) print as `?`.
+
+---
+
+## Firmware OTA
+
+The image also ships a patched TRMNL firmware for the E1002 and offers it to the device as an update:
+
+- `firmware/FIRMWARE_REF` sets the upstream [usetrmnl/trmnl-firmware](https://github.com/usetrmnl/trmnl-firmware) tag, and `firmware/FIRMWARE_ENV` sets the PlatformIO env.
+- `firmware/patches/*.patch` are applied on top of that tag. The current patches fix the E1002 build at v1.8.16 (missing `<stdint.h>`) and add a version suffix.
+- `firmware/build.sh` builds it in a Docker stage. The version becomes `<upstream>-cp.<hash of ref + env + patches>`, so any change produces a new version.
+
+On `/api/display`, a device whose `Model` matches and whose `FW-Version` differs gets `update_firmware: true`. The firmware then downloads and flashes itself, at most once per 24h. To change the firmware, edit the ref or the patches and redeploy. Build it locally with `firmware/build.sh /tmp/fw` (needs `pio`).
+
+Note: this also *downgrades* a device that was flashed with a newer official firmware. Set `FIRMWARE_UPDATE=false` to stop that.
 
 ---
 
@@ -185,10 +202,13 @@ To add a real data source, extend `Sources::fetch` in `src/fetch.rs`. The mock d
 | `GET` | `/api/setup` | TRMNL device provisioning |
 | `GET` | `/api/display` | TRMNL device poll — returns image URL |
 | `POST` | `/api/log` | TRMNL device diagnostic logs |
-| `GET` | `/dashboard.png` | Rendered fresh on every request (no cache) |
-| `GET` | `/dashboard/{epoch}` | Same handler; `{epoch}` is the cache-buster the firmware sees |
+| `GET` | `/dashboard.png` | Dashboard from the cache; header shows the most recently polled device |
+| `GET` | `/dashboard/{epoch}` | Same handler; `{epoch}` is a cache-buster |
+| `GET` | `/dashboard/{device}/{epoch}` | URL handed to each device: header shows that device's battery/RSSI (`{device}` = MAC hex) |
 | `GET` | `/note.png` | Memo screen, rendered fresh on every request |
-| `GET` | `/note/{epoch}` | Same handler; what `/api/display` points at on memo turns |
+| `GET` | `/note/{epoch}` | Same handler; `{epoch}` is a cache-buster |
+| `GET` | `/note/{device}/{epoch}` | Per-device memo URL; what `/api/display` points at on memo turns |
+| `GET` | `/firmware/{file}` | Bundled OTA firmware image |
 | `GET` | `/` | WYSIWYG memo editor |
 | `GET` | `/swagger` | Swagger UI for the memo, screen and ops endpoints (`/openapi.json`) |
 | `GET` / `PUT` | `/api/note` | Read the memo as JSON / replace it with the raw markdown body |
