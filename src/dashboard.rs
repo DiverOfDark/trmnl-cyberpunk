@@ -206,7 +206,7 @@ fn fit_unit_name(name: &str) -> UnitName {
             Some(w) if w <= UNIT_NAME_MAX_W => {
                 return UnitName { font, bold, text: name.to_string(), width: w };
             }
-            Some(_) if fallback.as_ref().map_or(true, |&(_, b)| b == bold) => {
+            Some(_) if fallback.as_ref().is_none_or(|&(_, b)| b == bold) => {
                 fallback = Some((font, bold));
             }
             _ => {}
