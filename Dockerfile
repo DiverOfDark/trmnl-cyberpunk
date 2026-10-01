@@ -13,7 +13,18 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs \
 COPY src ./src
 RUN cargo build --release --bin trmnl-cyberpunk
 
-# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+# ── Stage 2: Patched TRMNL firmware (OTA update for the device) ──────────────
+# See firmware/build.sh. The PlatformIO cache mount keeps the ESP32 toolchain
+# between builds; the layer only re-runs when firmware/ changes.
+FROM python:3.12-slim-bookworm AS firmware
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir platformio
+COPY firmware ./firmware
+RUN --mount=type=cache,target=/root/.platformio \
+    ./firmware/build.sh /out
+
+# ── Stage 3: Runtime ──────────────────────────────────────────────────────────
 # Pixel-direct rendering: no browser, no fonts, no graphics libs needed.
 # Just the static binary + ca-certs for HTTPS to upstream APIs.
 FROM debian:bookworm-slim
@@ -25,6 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY --from=builder /app/target/release/trmnl-cyberpunk ./trmnl-cyberpunk
+COPY --from=firmware /out ./firmware
 
 # The memo lives in DATA_DIR; mount a volume there to keep it across restarts.
 ENV LISTEN=0.0.0.0:8080 \

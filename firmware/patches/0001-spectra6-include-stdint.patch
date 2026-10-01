@@ -1,0 +1,13 @@
+diff --git a/src/displays/spectra6.h b/src/displays/spectra6.h
+index f858d77..a6d398d 100644
+--- a/src/displays/spectra6.h
++++ b/src/displays/spectra6.h
+@@ -7,6 +7,8 @@
+ 
+ #pragma once
+ 
++#include <stdint.h>
++
+ /**
+  * @brief Initializes the SPI interface for the Spectra6 display.
+  * @return true if initialization was successful, false otherwise.

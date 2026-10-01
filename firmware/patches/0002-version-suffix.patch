@@ -1,0 +1,22 @@
+diff --git a/include/config.h b/include/config.h
+index 6122182..efb6435 100644
+--- a/include/config.h
++++ b/include/config.h
+@@ -9,12 +9,16 @@
+ #define STRINGIFY(x)     #x
+ #define TOSTRING(x)      STRINGIFY(x)
+ 
++#ifndef FW_VERSION_SUFFIX
++#define FW_VERSION_SUFFIX ""
++#endif
++
+ #ifndef FW_COMMIT
+ #define FW_COMMIT ""
+ #endif
+ 
+ // Compile-time firmware version string
+-#define FW_VERSION_STRING    TOSTRING(FW_MAJOR_VERSION) "." TOSTRING(FW_MINOR_VERSION) "." TOSTRING(FW_PATCH_VERSION)
++#define FW_VERSION_STRING    TOSTRING(FW_MAJOR_VERSION) "." TOSTRING(FW_MINOR_VERSION) "." TOSTRING(FW_PATCH_VERSION) FW_VERSION_SUFFIX
+ 
+ #define LOG_MAX_NOTES_NUMBER 10
+ 
