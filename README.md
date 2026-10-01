@@ -126,11 +126,13 @@ trmnlApiKey: "your-secret-key"
 image:
   tag: "main"                          # or a semver tag like "0.1.0"
 persistence:
-  enabled: true                        # PVC for the memo; Recreate strategy
+  enabled: true                        # PVC for the memo (off by default)
+  storageClass: ceph-filesystem
+  accessMode: ReadWriteMany            # RWO switches to Recreate strategy
   size: 64Mi
 ```
 
-With `persistence.enabled` the deployment uses the `Recreate` strategy, since a ReadWriteOnce volume can't attach to the new pod while the old one holds it. The PVC carries `helm.sh/resource-policy: keep`, so uninstalling the release doesn't delete the memo.
+Without `persistence.enabled` the memo lives in an `emptyDir` and is lost when the pod is replaced. With a ReadWriteOnce volume the deployment uses the `Recreate` strategy, since the volume can't attach to the new pod while the old one holds it; ReadWriteMany keeps rolling updates. The PVC carries `helm.sh/resource-policy: keep`, so uninstalling the release doesn't delete the memo.
 
 ---
 

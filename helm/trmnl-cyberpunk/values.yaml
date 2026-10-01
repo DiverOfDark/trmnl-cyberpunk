@@ -98,11 +98,17 @@ timezone: "Europe/Berlin"
 # The web editor at / saves one markdown memo to $DATA_DIR/note.md,
 # which the device shows as its own screen between dashboard frames. Without
 # persistence the memo lives in an emptyDir and is lost when the pod goes.
+#
+# Off by default so turning it on is a deliberate choice of storageClass:
+# a PVC's class and access mode are immutable once created.
 persistence:
-  enabled: true
+  enabled: false
   # Use a PVC you manage yourself instead of letting the chart create one.
   existingClaim: ""
   storageClass: ""
+  # ReadWriteOnce makes the deployment use the Recreate strategy (the new
+  # pod can't mount the volume until the old one lets go). ReadWriteMany,
+  # e.g. CephFS, keeps rolling updates.
   accessMode: ReadWriteOnce
   size: 64Mi
   mountPath: /data

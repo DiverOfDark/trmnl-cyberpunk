@@ -10,7 +10,8 @@ spec:
   strategy:
     # A ReadWriteOnce memo volume can't attach to the new pod while the old
     # one still holds it, so a rolling update would wedge on another node.
-    type: {{ if .Values.persistence.enabled }}Recreate{{ else }}RollingUpdate{{ end }}
+    {{- $rwo := and .Values.persistence.enabled (hasPrefix "ReadWriteOnce" .Values.persistence.accessMode) }}
+    type: {{ if $rwo }}Recreate{{ else }}RollingUpdate{{ end }}
   selector:
     matchLabels:
       {{- include "trmnl-cyberpunk.selectorLabels" . | nindent 6 }}
