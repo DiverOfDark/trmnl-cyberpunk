@@ -27,3 +27,7 @@ data:
   WEATHER_LON: {{ .Values.weatherLon | default "13.33" | quote }}
   WEATHER_TZ: {{ .Values.weatherTz | default "Europe/Berlin" | quote }}
   TRACKHOUND_BASE_URL: {{ .Values.trackhoundBaseUrl | default "" | quote }}
+  IMAP_HOST: {{ .Values.imap.host | default "" | quote }}
+  IMAP_PORT: {{ .Values.imap.port | default "993" | quote }}
+  IMAP_USER: {{ .Values.imap.user | default "" | quote }}
+  IMAP_MAILBOX: {{ .Values.imap.mailbox | default "INBOX" | quote }}

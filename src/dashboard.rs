@@ -22,10 +22,10 @@ use crate::render::{Canvas, Rect, C};
 //
 // Each constant is a function to dodge u8g2-fonts' generic API.
 
-fn f_body() -> FontRenderer {
+pub(crate) fn f_body() -> FontRenderer {
     FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvR10_te>()
 }
-fn f_body_bold() -> FontRenderer {
+pub(crate) fn f_body_bold() -> FontRenderer {
     FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvB10_te>()
 }
 pub(crate) fn f_small() -> FontRenderer {
@@ -37,10 +37,10 @@ pub(crate) fn f_small_bold() -> FontRenderer {
 pub(crate) fn f_lg_bold() -> FontRenderer {
     FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvB14_te>()
 }
-fn f_xl_bold() -> FontRenderer {
+pub(crate) fn f_xl_bold() -> FontRenderer {
     FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvB18_te>()
 }
-fn f_huge_bold() -> FontRenderer {
+pub(crate) fn f_huge_bold() -> FontRenderer {
     FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvB24_te>()
 }
 fn f_temperature() -> FontRenderer {
@@ -82,7 +82,7 @@ pub(crate) fn draw_text(
 /// crude CSS `text-shadow: 0 1px 0 #000, 1px 0 0 #000, ...;` equivalent.
 /// Used for legibility over busy backgrounds like the hatched header.
 #[allow(clippy::too_many_arguments)]
-fn draw_outlined_text(
+pub(crate) fn draw_outlined_text(
     canvas: &mut Canvas,
     font: &FontRenderer,
     text: &str,
@@ -675,7 +675,7 @@ fn draw_weather_icon_small(c: &mut Canvas, cx: i32, cy: i32, size: i32, cond: &s
     }
 }
 
-fn fill_disc(c: &mut Canvas, cx: i32, cy: i32, r: i32, color: C) {
+pub(crate) fn fill_disc(c: &mut Canvas, cx: i32, cy: i32, r: i32, color: C) {
     let r2 = r * r;
     for dy in -r..=r {
         for dx in -r..=r {
@@ -1224,7 +1224,7 @@ fn draw_ops(c: &mut Canvas, alerts: &[Alert], stale: Option<&str>) {
 }
 
 /// Drop characters off the end of `s` until it fits, ellipsizing with "…".
-fn clip_to_width(font: &FontRenderer, s: &str, max_w: u32) -> String {
+pub(crate) fn clip_to_width(font: &FontRenderer, s: &str, max_w: u32) -> String {
     if text_width(font, s) <= max_w {
         return s.to_string();
     }
@@ -1242,6 +1242,11 @@ fn clip_to_width(font: &FontRenderer, s: &str, max_w: u32) -> String {
 // ── Footer (22px tall) ─────────────────────────────────────────────────────
 
 pub(crate) fn draw_footer(c: &mut Canvas, data: &DashData) {
+    draw_footer_with(c, data, &data.status.degraded(chrono::Utc::now()));
+}
+
+/// The footer, summarizing `degraded` — the panels of the screen being drawn.
+pub(crate) fn draw_footer_with(c: &mut Canvas, data: &DashData, degraded: &[(&str, String)]) {
     let y0 = (480 - FTR_H) as i32;
     c.fill_rect(Rect::new(0, y0, crate::render::W, FTR_H), C::Black);
 
@@ -1258,7 +1263,6 @@ pub(crate) fn draw_footer(c: &mut Canvas, data: &DashData) {
     // Status word: ONLINE only when every source answered on the last pull.
     // Otherwise name the panels that are showing old data, so the degraded
     // state is legible from across the room without auditing five headers.
-    let degraded = data.status.degraded(chrono::Utc::now());
     // Status dot drawn as a primitive, not text: u8g2's Latin-extended fonts
     // have no U+25CF, and a missing glyph makes render_aligned drop the whole
     // string — which is how the old "● ONLINE" line came out blank.

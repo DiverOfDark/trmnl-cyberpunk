@@ -94,6 +94,7 @@
   <div class="hatch"></div>
   <div class="status" id="status" data-state="saved"><i></i><span>LOADING</span></div>
   <a class="api" href="devices">DEVICES //</a>
+  <a class="api" href="agents">AGENTS //</a>
   <a class="api" href="swagger/" title="REST API (Swagger UI)">API //</a>
 </header>
 <main>
@@ -102,13 +103,14 @@
     <div class="bar" role="group" aria-label="Preview screen">
       <button type="button" data-screen="note.png" aria-pressed="true">MEMO</button>
       <button type="button" data-screen="dashboard.png" aria-pressed="false">DASHBOARD</button>
+      <button type="button" data-screen="desk.png" aria-pressed="false">DESK</button>
     </div>
     <div class="bezel">
       <img id="preview" width="800" height="480"
            alt="The screen exactly as the device will render it" src="note.png">
     </div>
     <p>Pixel-exact render of the panel, updated as you type. Devices assigned to the memo
-       show it on their next wake-up; pick which ones under <a href="devices">DEVICES</a>.</p>
+       (and the desk screen's TODAY column) show it on their next wake-up; pick which ones under <a href="devices">DEVICES</a>.</p>
   </aside>
 </main>
 

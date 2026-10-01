@@ -7,7 +7,9 @@ use reqwest::Client;
 use serde_json::Value;
 use tracing::{info, warn};
 
+use crate::agents::Agents;
 use crate::data::*;
+use crate::inbox::Imap;
 
 // ── Sources config ─────────────────────────────────────────────────────────
 
@@ -145,10 +147,14 @@ pub struct Sources {
     pub weather_lon: f64,
     pub weather_tz: String,
     pub trackhound_base_url: String,
+    /// Claude / Codex logins for the desk screen's rate limits, shared with
+    /// the sign-in endpoints behind `/agents`.
+    pub agents: std::sync::Arc<Agents>,
+    pub imap: Option<Imap>,
 }
 
 impl Sources {
-    pub fn from_env() -> Self {
+    pub fn from_env(data_dir: &std::path::Path) -> Self {
         Self {
             client: Client::builder()
                 // 30 s — Outlook/Office365 published-calendar endpoints can
@@ -205,6 +211,8 @@ impl Sources {
             weather_tz: std::env::var("WEATHER_TZ")
                 .unwrap_or_else(|_| "Europe/Berlin".into()),
             trackhound_base_url: base_url_env("TRACKHOUND_BASE_URL"),
+            agents: std::sync::Arc::new(Agents::new(data_dir)),
+            imap: Imap::from_env(),
         }
     }
 
@@ -213,14 +221,28 @@ impl Sources {
     /// flaky upstream degrades one panel's freshness instead of blanking it.
     pub async fn fetch(&self, prev: &DashData) -> DashData {
         let t = section_timeout();
-        let (hosts_r, cluster_r, weather_r, alerts_r, budget_r, agenda_r, shipments_r) = tokio::join!(
-            tokio::time::timeout(t, self.hosts()),
-            tokio::time::timeout(t, self.cluster()),
-            tokio::time::timeout(t, self.weather()),
-            tokio::time::timeout(t, self.alerts()),
-            tokio::time::timeout(t, self.budget()),
-            tokio::time::timeout(t, self.agenda()),
-            tokio::time::timeout(t, self.shipments_due_today()),
+        let (
+            (hosts_r, cluster_r, weather_r, alerts_r, budget_r, agenda_r, shipments_r),
+            (claude_r, codex_r, inbox_r),
+        ) = tokio::join!(
+            async {
+                tokio::join!(
+                    tokio::time::timeout(t, self.hosts()),
+                    tokio::time::timeout(t, self.cluster()),
+                    tokio::time::timeout(t, self.weather()),
+                    tokio::time::timeout(t, self.alerts()),
+                    tokio::time::timeout(t, self.budget()),
+                    tokio::time::timeout(t, self.agenda()),
+                    tokio::time::timeout(t, self.shipments_due_today()),
+                )
+            },
+            async {
+                tokio::join!(
+                    tokio::time::timeout(t, self.agents.claude()),
+                    tokio::time::timeout(t, self.agents.codex()),
+                    tokio::time::timeout(t, Imap::fetch(self.imap.as_ref())),
+                )
+            },
         );
 
         let stamp = Utc::now();
@@ -275,6 +297,30 @@ impl Sources {
             p.shipments,
             stamp,
         );
+        let (claude, s_claude) = resolve(
+            "claude",
+            claude_r.map(|r| r.map(Some)),
+            prev.claude.clone(),
+            None,
+            p.claude,
+            stamp,
+        );
+        let (codex, s_codex) = resolve(
+            "codex",
+            codex_r.map(|r| r.map(Some)),
+            prev.codex.clone(),
+            None,
+            p.codex,
+            stamp,
+        );
+        let (inbox, s_inbox) = resolve(
+            "inbox",
+            inbox_r.map(|r| r.map(Some)),
+            prev.inbox.clone(),
+            None,
+            p.inbox,
+            stamp,
+        );
         let status = Status {
             hosts: s_hosts,
             cluster: s_cluster,
@@ -283,6 +329,9 @@ impl Sources {
             budget: s_budget,
             agenda: s_agenda,
             shipments: s_shipments,
+            claude: s_claude,
+            codex: s_codex,
+            inbox: s_inbox,
         };
 
         let now = Local::now();
@@ -319,6 +368,9 @@ impl Sources {
             budget,
             alerts,
             shipments_due_today,
+            claude,
+            codex,
+            inbox,
             status,
         }
     }

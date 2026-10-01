@@ -91,6 +91,9 @@ pub struct Status {
     pub budget: SectionStatus,
     pub agenda: SectionStatus,
     pub shipments: SectionStatus,
+    pub claude: SectionStatus,
+    pub codex: SectionStatus,
+    pub inbox: SectionStatus,
 }
 
 impl Status {
@@ -101,6 +104,7 @@ impl Status {
         Self {
             hosts: f, cluster: f, weather: f, alerts: f,
             budget: f, agenda: f, shipments: f,
+            claude: f, codex: f, inbox: f,
         }
     }
 
@@ -126,26 +130,49 @@ impl Status {
         [
             self.hosts, self.cluster, self.weather, self.alerts,
             self.budget, self.agenda, self.shipments,
+            self.claude, self.codex, self.inbox,
         ]
         .into_iter()
         .filter_map(|s| s.last_ok)
         .max()
     }
 
-    /// `(panel tag, marker)` for every panel currently degraded — drives the
-    /// footer summary so a glance at the bottom line says whether anything on
-    /// screen is out of date.
+    pub fn agents_panel(&self) -> SectionStatus {
+        SectionStatus::worse_of(self.claude, self.codex)
+    }
+
+    /// `(panel tag, marker)` for every dashboard panel currently degraded —
+    /// drives the footer summary so a glance at the bottom line says whether
+    /// anything on screen is out of date.
     pub fn degraded(&self, now: DateTime<Utc>) -> Vec<(&'static str, String)> {
-        [
+        Self::markers(now, [
             ("WX", self.wx()),
             ("AGENDA", self.agenda_panel()),
             ("SYS", self.sys()),
             ("€", self.budget_panel()),
             ("OPS", self.ops()),
-        ]
-        .into_iter()
-        .filter_map(|(tag, s)| s.marker(now).map(|m| (tag, m)))
-        .collect()
+        ])
+    }
+
+    /// The same summary for the desk screen's panels. Kept apart from
+    /// `degraded` so a dashboard never reports a source it doesn't show.
+    pub fn desk_degraded(&self, now: DateTime<Utc>) -> Vec<(&'static str, String)> {
+        Self::markers(now, [
+            ("AGENTS", self.agents_panel()),
+            ("NEXT", self.agenda),
+            ("OPS", self.ops()),
+            ("INBOX", self.inbox),
+        ])
+    }
+
+    fn markers<const N: usize>(
+        now: DateTime<Utc>,
+        panels: [(&'static str, SectionStatus); N],
+    ) -> Vec<(&'static str, String)> {
+        panels
+            .into_iter()
+            .filter_map(|(tag, s)| s.marker(now).map(|m| (tag, m)))
+            .collect()
     }
 }
 
@@ -385,6 +412,87 @@ pub struct ShipmentHighlight {
     pub status: String,
 }
 
+/// Rate-limit state of one coding-agent subscription (Claude, Codex): a
+/// rolling 5-hour session window and a weekly one, each as percent used.
+#[derive(Clone, Serialize)]
+pub struct AgentUsage {
+    /// Short display name, e.g. `CLAUDE`.
+    pub name: String,
+    /// 5-hour session window, percent used (0..100).
+    pub session_pct: u8,
+    /// When the session window resets. `None` while it hasn't started.
+    pub session_resets: Option<DateTime<Utc>>,
+    /// Length of the session window, seconds (5h for both providers today).
+    pub session_window_secs: i64,
+    /// Weekly window, percent used (0..100).
+    pub week_pct: u8,
+    pub week_resets: Option<DateTime<Utc>>,
+    pub week_window_secs: i64,
+    /// The provider says requests are being refused right now.
+    pub limited: bool,
+}
+
+impl AgentUsage {
+    /// Share of a window already elapsed at `now`, percent. `None` when the
+    /// window has no reset time (nothing used yet, so nothing has started).
+    fn elapsed_pct(resets: Option<DateTime<Utc>>, window: i64, now: DateTime<Utc>) -> Option<f64> {
+        let left = (resets? - now).num_seconds().clamp(0, window);
+        Some((window - left) as f64 * 100.0 / window.max(1) as f64)
+    }
+
+    /// Where the session window will end up if usage continues at its
+    /// average rate so far, percent (capped at 100). `None` in the first
+    /// quarter hour, when a single prompt would extrapolate to a wall.
+    pub fn session_projection(&self, now: DateTime<Utc>) -> Option<u8> {
+        let elapsed = Self::elapsed_pct(self.session_resets, self.session_window_secs, now)?;
+        let elapsed_secs = elapsed / 100.0 * self.session_window_secs as f64;
+        (elapsed_secs >= 900.0)
+            .then(|| (self.session_pct as f64 * 100.0 / elapsed).round().min(100.0) as u8)
+    }
+
+    /// How far through the week we are, percent: the point where usage would
+    /// sit if spread evenly. `None` before the week window has started.
+    pub fn week_pace(&self, now: DateTime<Utc>) -> Option<u8> {
+        Self::elapsed_pct(self.week_resets, self.week_window_secs, now).map(|p| p.round() as u8)
+    }
+
+    /// Requests are refused, or one of the windows is spent.
+    pub fn is_limited(&self) -> bool {
+        self.limited || self.session_pct >= 100 || self.week_pct >= 100
+    }
+
+    /// When a limited agent comes back: the later reset among the spent
+    /// windows (the session window alone when the provider didn't say which).
+    pub fn back_at(&self) -> Option<DateTime<Utc>> {
+        if self.week_pct >= 100 {
+            self.week_resets.max(self.session_resets)
+        } else {
+            self.session_resets
+        }
+    }
+}
+
+/// One unread message for the inbox panel.
+#[derive(Clone, Serialize)]
+pub struct MailItem {
+    /// Sender display name, or the address's local part without one.
+    pub from: String,
+    pub subject: String,
+    pub received: DateTime<Utc>,
+    /// Written by a person rather than a list, a shop or a robot.
+    pub person: bool,
+}
+
+#[derive(Clone, Default, Serialize)]
+pub struct InboxData {
+    /// Unseen messages in the mailbox.
+    pub unread: u32,
+    /// Of the unread messages looked at, how many came from people.
+    pub people: u32,
+    /// The unread messages worth listing: people first, then newest first.
+    pub recent: Vec<MailItem>,
+}
+
 #[derive(Clone, Serialize)]
 pub struct DashData {
     pub time: String,
@@ -407,6 +515,12 @@ pub struct DashData {
     pub budget: Option<BudgetData>,
     pub alerts: Vec<Alert>,
     pub shipments_due_today: Vec<ShipmentHighlight>,
+    /// Coding-agent rate limits for the desk screen. `None` when the
+    /// provider's credentials aren't configured.
+    pub claude: Option<AgentUsage>,
+    pub codex: Option<AgentUsage>,
+    /// Unread mail for the desk screen. `None` when IMAP isn't configured.
+    pub inbox: Option<InboxData>,
     /// Per-source freshness of everything above. The dashboard is rendered
     /// from cache, so this is how the panel admits when what it's showing is
     /// older than it looks.
@@ -490,6 +604,9 @@ impl DashData {
             budget: None,
             alerts: Vec::new(),
             shipments_due_today: Vec::new(),
+            claude: None,
+            codex: None,
+            inbox: None,
             status: Status::default(),
         };
         d.refresh_clock();
@@ -629,6 +746,35 @@ impl DashData {
             shipments_due_today: vec![
                 ShipmentHighlight { number: "00340435063414124778".into(), remark: "SeeedStudio - reTerminal".into(), status: "Delivered today".into() },
             ],
+            claude: Some(AgentUsage {
+                name: "CLAUDE".into(),
+                session_pct: 42,
+                session_resets: Some(Utc::now() + chrono::Duration::minutes(133)),
+                session_window_secs: 5 * 3600,
+                week_pct: 44,
+                week_resets: Some(Utc::now() + chrono::Duration::hours(114)),
+                week_window_secs: 7 * 86_400,
+                limited: false,
+            }),
+            codex: Some(AgentUsage {
+                name: "CODEX".into(),
+                session_pct: 23,
+                session_resets: Some(Utc::now() + chrono::Duration::minutes(218)),
+                session_window_secs: 5 * 3600,
+                week_pct: 61,
+                week_resets: Some(Utc::now() + chrono::Duration::hours(45)),
+                week_window_secs: 7 * 86_400,
+                limited: false,
+            }),
+            inbox: Some(InboxData {
+                unread: 7,
+                people: 2,
+                recent: vec![
+                    MailItem { from: "Landlord".into(), subject: "Heating inspection on Friday".into(), received: Utc::now() - chrono::Duration::minutes(82), person: true },
+                    MailItem { from: "A.".into(), subject: "Re: Saturday plans".into(), received: Utc::now() - chrono::Duration::minutes(155), person: true },
+                    MailItem { from: "Hetzner".into(), subject: "Invoice 2026-09 available".into(), received: Utc::now() - chrono::Duration::minutes(315), person: false },
+                ],
+            }),
             // Mock data is fabricated on the spot, so nothing is ever stale.
             status: Status::all_fresh(Utc::now()),
         }

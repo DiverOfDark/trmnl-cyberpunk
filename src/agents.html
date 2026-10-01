@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TRMNL // AGENTS</title>
+<style>
+  /* Same panel inks and header as the devices page. */
+  :root {
+    --ink: #020202; --paper: #e9eadf; --blue: #002f6b;
+    --yellow: #cdca00; --red: #750a00; --green: #214528;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--paper); color: var(--ink);
+    font: 14px/1.4 ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  header {
+    display: flex; align-items: stretch; height: 44px;
+    border-bottom: 3px solid var(--ink);
+  }
+  .unit {
+    background: var(--ink); color: var(--paper);
+    padding: 0 28px 0 12px; display: flex; align-items: center; gap: 8px;
+    clip-path: polygon(0 0, 100% 0, calc(100% - 14px) 100%, 0 100%);
+    font-weight: 700; font-size: 22px; letter-spacing: .02em;
+  }
+  .unit small { font-size: 10px; font-weight: 400; }
+  .hatch {
+    flex: 1;
+    background: repeating-linear-gradient(135deg,
+      var(--red) 0 6px, var(--ink) 6px 8px, var(--red) 8px 14px, var(--paper) 14px 20px);
+  }
+  .status {
+    min-width: 200px; padding: 0 12px; display: flex; align-items: center;
+    justify-content: flex-end; gap: 8px; font-weight: 700; font-size: 12px;
+  }
+  .status i { width: 8px; height: 8px; background: var(--green); display: inline-block; }
+  .status[data-state="saving"] i { background: var(--yellow); }
+  .status[data-state="error"] i { background: var(--red); }
+  .status[data-state="error"] { color: var(--red); }
+  .nav {
+    display: flex; align-items: center; padding: 0 12px;
+    border-left: 3px solid var(--ink); color: var(--blue);
+    font-weight: 700; font-size: 12px; text-decoration: none;
+  }
+  .nav:hover { background: var(--ink); color: var(--paper); }
+
+  main { padding: 16px; display: grid; gap: 16px;
+         grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+  .empty { grid-column: 1 / -1; opacity: .75; }
+  .card { border: 2px solid var(--ink); background: #fff; }
+  .card h2 {
+    margin: 0; padding: 6px 10px; display: flex; align-items: center; gap: 8px;
+    background: var(--ink); color: var(--paper); font-size: 14px;
+  }
+  .card h2 .name { flex: 1; }
+  .badge { font-size: 11px; padding: 1px 6px; color: var(--paper); }
+  .badge.on { background: var(--green); }
+  .badge.wait { background: var(--yellow); color: var(--ink); }
+  .badge.off { background: var(--red); }
+  dl { margin: 0; padding: 10px; display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; }
+  dt { font-size: 11px; opacity: .6; align-self: center; }
+  dd { margin: 0; font-weight: 700; }
+  .bar { display: flex; padding: 0 10px 10px; }
+  .bar button {
+    flex: 1; font: inherit; font-weight: 700; font-size: 11px; padding: 5px 6px; cursor: pointer;
+    background: var(--paper); color: var(--ink); border: 2px solid var(--ink);
+  }
+  .bar button + button { border-left: 0; }
+  .bar button.primary { background: var(--ink); color: var(--paper); }
+  .bar button:disabled { opacity: .4; cursor: default; }
+  .hint { padding: 0 10px 10px; margin: 0; font-size: 11px; opacity: .65; }
+  .step { padding: 0 10px 10px; margin: 0; }
+  .step a { color: var(--blue); font-weight: 700; word-break: break-all; }
+  .code { font-size: 28px; font-weight: 700; letter-spacing: .12em; padding: 4px 10px 10px; }
+  .paste { display: flex; padding: 0 10px 10px; gap: 0; }
+  .paste input { flex: 1; min-width: 0; font: inherit; padding: 5px 6px; border: 2px solid var(--ink); }
+  .paste button { font: inherit; font-weight: 700; font-size: 11px; padding: 5px 10px; cursor: pointer;
+                  background: var(--ink); color: var(--paper); border: 2px solid var(--ink); }
+  .error { margin: 0 10px 10px; padding: 6px 8px; background: var(--red); color: var(--paper);
+           font-size: 12px; word-break: break-word; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <div class="unit"><small>UNIT</small>TRMNL // AGENTS</div>
+  <div class="hatch"></div>
+  <div class="status" id="status" data-state="saved"><i></i><span>LOADING</span></div>
+  <a class="nav" href="./">MEMO //</a>
+  <a class="nav" href="devices">DEVICES //</a>
+  <a class="nav" href="swagger/" title="REST API (Swagger UI)">API //</a>
+</header>
+<main id="list"></main>
+
+<template id="card">
+  <section class="card">
+    <h2><span class="name"></span><span class="badge"></span></h2>
+    <dl>
+      <dt>ACCOUNT</dt><dd class="account"></dd>
+      <dt>5H SESSION</dt><dd class="session"></dd>
+      <dt>WEEK</dt><dd class="week"></dd>
+    </dl>
+    <p class="error" hidden></p>
+
+    <div class="paste-flow" hidden>
+      <p class="step">1. <a class="authorize" target="_blank" rel="noopener">Open the sign-in page</a> and approve.</p>
+      <p class="step">2. Paste the code it shows:</p>
+      <form class="paste"><input name="code" autocomplete="off" placeholder="code#state"><button>SIGN IN</button></form>
+    </div>
+    <div class="device-flow" hidden>
+      <p class="step">Enter this code at <a class="verify" target="_blank" rel="noopener"></a>:</p>
+      <div class="code"></div>
+      <p class="hint expires"></p>
+    </div>
+
+    <div class="bar">
+      <button type="button" class="primary sign-in">SIGN IN</button>
+      <button type="button" class="cancel" hidden>CANCEL</button>
+      <button type="button" class="sign-out" hidden>SIGN OUT</button>
+    </div>
+    <p class="hint"></p>
+  </section>
+</template>
+
+<script>
+(() => {
+  const list = document.getElementById('list');
+  const tpl = document.getElementById('card');
+  const status = document.getElementById('status');
+  const setStatus = (state, text) => {
+    status.dataset.state = state;
+    status.querySelector('span').textContent = text;
+  };
+  const NAMES = { claude: 'CLAUDE', codex: 'CODEX' };
+  const HINTS = {
+    claude: 'Signs the server in with its own Claude login, separate from any CLI. Only reads usage.',
+    codex: 'Signs the server in with its own ChatGPT login for Codex, separate from any CLI. Only reads usage.',
+  };
+  const cards = {};
+  const wasSignedIn = {};
+
+  const send = async (method, url, body) => {
+    const r = await fetch(url, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!r.ok) throw new Error((await r.text()) || r.statusText);
+    return r;
+  };
+
+  const act = async (label, fn) => {
+    setStatus('saving', label);
+    try { await fn(); await load(); }
+    catch (e) { setStatus('error', 'FAILED'); alert(e.message); }
+  };
+
+  const card = (p) => {
+    if (cards[p]) return cards[p];
+    const c = tpl.content.firstElementChild.cloneNode(true);
+    c.querySelector('.name').textContent = NAMES[p];
+    c.querySelector('.hint:last-child').textContent = HINTS[p];
+    c.querySelector('.sign-in').addEventListener('click', () =>
+      act('STARTING', async () => {
+        const r = await send('POST', `api/agents/${p}/login`);
+        const pending = await r.json();
+        if (pending && pending.kind === 'paste_code') window.open(pending.authorize_url, '_blank', 'noopener');
+      }));
+    c.querySelector('.cancel').addEventListener('click', () =>
+      act('CANCELLING', () => send('DELETE', `api/agents/${p}/login`)));
+    c.querySelector('.sign-out').addEventListener('click', () => {
+      if (confirm(`Sign ${NAMES[p]} out? The desk screen stops showing its limits.`))
+        act('SIGNING OUT', () => send('DELETE', `api/agents/${p}/login`));
+    });
+    c.querySelector('.paste').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const input = e.target.elements.code;
+      act('SIGNING IN', async () => {
+        await send('POST', 'api/agents/claude/code', { code: input.value });
+        input.value = '';
+      });
+    });
+    list.append(c);
+    return cards[p] = c;
+  };
+
+  const render = (a) => {
+    const c = card(a.provider);
+    const pending = a.pending;
+    const badge = c.querySelector('.badge');
+    if (pending) { badge.className = 'badge wait'; badge.textContent = 'SIGNING IN'; }
+    else if (a.signed_in && a.error) { badge.className = 'badge off'; badge.textContent = 'ERROR'; }
+    else if (a.signed_in) { badge.className = 'badge on'; badge.textContent = 'SIGNED IN'; }
+    else { badge.className = 'badge off'; badge.textContent = 'SIGNED OUT'; }
+
+    c.querySelector('.account').textContent = a.signed_in ? (a.account || 'signed in') : '—';
+    c.querySelector('.session').textContent = a.session_pct == null ? '—' : a.session_pct + '%';
+    c.querySelector('.week').textContent = a.week_pct == null ? '—' : a.week_pct + '%';
+    const err = c.querySelector('.error');
+    err.hidden = !a.error;
+    err.textContent = a.error || '';
+
+    const paste = c.querySelector('.paste-flow');
+    const device = c.querySelector('.device-flow');
+    paste.hidden = !(pending && pending.kind === 'paste_code');
+    device.hidden = !(pending && pending.kind === 'device_code');
+    if (!paste.hidden) c.querySelector('.authorize').href = pending.authorize_url;
+    if (!device.hidden) {
+      const v = c.querySelector('.verify');
+      v.href = v.textContent = pending.verification_url;
+      c.querySelector('.code').textContent = pending.user_code;
+      c.querySelector('.expires').textContent =
+        'Expires ' + new Date(pending.expires_at).toLocaleTimeString([], { hour12: false }) +
+        '. This page updates by itself once you approve.';
+    }
+
+    const signIn = c.querySelector('.sign-in');
+    signIn.hidden = !!pending;
+    signIn.textContent = a.signed_in ? 'SIGN IN AGAIN' : 'SIGN IN';
+    c.querySelector('.cancel').hidden = !pending;
+    c.querySelector('.sign-out').hidden = !a.signed_in || !!pending;
+
+    // A sign-in finished: pull usage now rather than on the next cycle.
+    if (a.signed_in && wasSignedIn[a.provider] === false) fetch('refresh').then(load);
+    wasSignedIn[a.provider] = a.signed_in;
+  };
+
+  let timer;
+  const load = async () => {
+    clearTimeout(timer);
+    try {
+      const agents = await (await fetch('api/agents')).json();
+      agents.forEach(render);
+      setStatus('saved', 'LIVE');
+      // Poll fast while a device code waits for approval.
+      const waiting = agents.some((a) => a.pending && a.pending.kind === 'device_code');
+      timer = setTimeout(load, waiting ? 3000 : 15000);
+    } catch (e) {
+      setStatus('error', 'OFFLINE');
+      timer = setTimeout(load, 15000);
+    }
+  };
+  load();
+})();
+</script>
+</body>
+</html>

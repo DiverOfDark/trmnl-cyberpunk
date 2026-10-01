@@ -52,6 +52,15 @@ services:
       # See https://github.com/DiverOfDark/trackhound
       TRACKHOUND_BASE_URL: ""
 
+      # Desk screen (assign it per device on /devices).
+      # INBOX: unread mail over IMAP with implicit TLS. Blank host disables it.
+      IMAP_HOST: ""
+      IMAP_PORT: "993"
+      IMAP_USER: ""
+      IMAP_PASSWORD: ""
+      IMAP_MAILBOX: "INBOX"
+      # AGENTS: sign Claude and Codex in at /agents; the logins live in /data.
+
       # Offer the bundled patched firmware (see firmware/) to the device as
       # an OTA update. "false" to disable.
       FIRMWARE_UPDATE: "true"

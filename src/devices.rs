@@ -28,6 +28,8 @@ pub enum Mode {
     Dashboard,
     /// Always the memo (its empty-state screen when there is none).
     Note,
+    /// The desk screen: agent limits, next event + memo, alerts, inbox.
+    Desk,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
@@ -138,6 +140,7 @@ impl DeviceStore {
         let screen = match device.mode {
             Mode::Dashboard => Screen::Dashboard,
             Mode::Note => Screen::Note,
+            Mode::Desk => Screen::Desk,
         };
         device.last_screen = Some(screen);
         self.save(&devices).await;
