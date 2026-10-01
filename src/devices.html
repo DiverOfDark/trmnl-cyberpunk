@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TRMNL // DEVICES</title>
+<style>
+  /* Same panel inks and header as the memo editor. */
+  :root {
+    --ink: #020202; --paper: #e9eadf; --blue: #002f6b;
+    --yellow: #cdca00; --red: #750a00; --green: #214528;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--paper); color: var(--ink);
+    font: 14px/1.4 ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  header {
+    display: flex; align-items: stretch; height: 44px;
+    border-bottom: 3px solid var(--ink);
+  }
+  .unit {
+    background: var(--ink); color: var(--paper);
+    padding: 0 28px 0 12px; display: flex; align-items: center; gap: 8px;
+    clip-path: polygon(0 0, 100% 0, calc(100% - 14px) 100%, 0 100%);
+    font-weight: 700; font-size: 22px; letter-spacing: .02em;
+  }
+  .unit small { font-size: 10px; font-weight: 400; }
+  .hatch {
+    flex: 1;
+    background: repeating-linear-gradient(135deg,
+      var(--red) 0 6px, var(--ink) 6px 8px, var(--red) 8px 14px, var(--paper) 14px 20px);
+  }
+  .status {
+    min-width: 200px; padding: 0 12px; display: flex; align-items: center;
+    justify-content: flex-end; gap: 8px; font-weight: 700; font-size: 12px;
+  }
+  .status i { width: 8px; height: 8px; background: var(--green); display: inline-block; }
+  .status[data-state="saving"] i { background: var(--yellow); }
+  .status[data-state="error"] i { background: var(--red); }
+  .status[data-state="error"] { color: var(--red); }
+  .nav {
+    display: flex; align-items: center; padding: 0 12px;
+    border-left: 3px solid var(--ink); color: var(--blue);
+    font-weight: 700; font-size: 12px; text-decoration: none;
+  }
+  .nav:hover { background: var(--ink); color: var(--paper); }
+
+  main { padding: 16px; display: grid; gap: 16px;
+         grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+  .empty { grid-column: 1 / -1; opacity: .75; }
+  .card { border: 2px solid var(--ink); background: #fff; }
+  .card h2 {
+    margin: 0; padding: 6px 10px; display: flex; align-items: center; gap: 8px;
+    background: var(--ink); color: var(--paper); font-size: 14px;
+  }
+  .card h2 input {
+    flex: 1; min-width: 0; font: inherit; font-weight: 700; color: inherit;
+    background: transparent; border: 0; border-bottom: 1px dashed #777; padding: 2px 0;
+  }
+  .card h2 input:focus { outline: none; border-bottom-color: var(--yellow); }
+  .card h2 input::placeholder { color: #999; }
+  .card h2 button {
+    font: inherit; font-size: 11px; background: none; color: #999;
+    border: 1px solid #555; cursor: pointer; padding: 1px 6px;
+  }
+  .card h2 button:hover { color: var(--paper); border-color: var(--red); background: var(--red); }
+  .badge { font-size: 11px; padding: 1px 6px; color: var(--paper); }
+  .badge.on { background: var(--green); }
+  .badge.late { background: var(--yellow); color: var(--ink); }
+  .badge.off { background: var(--red); }
+  dl { margin: 0; padding: 10px; display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; }
+  dt { font-size: 11px; opacity: .6; align-self: center; }
+  dd { margin: 0; font-weight: 700; }
+  .bar { display: flex; padding: 0 10px 10px; }
+  .bar button {
+    flex: 1; font: inherit; font-weight: 700; font-size: 11px; padding: 5px 6px; cursor: pointer;
+    background: var(--paper); color: var(--ink); border: 2px solid var(--ink);
+  }
+  .bar button + button { border-left: 0; }
+  .bar button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+  .hint { padding: 0 10px 10px; margin: 0; font-size: 11px; opacity: .65; }
+</style>
+</head>
+<body>
+<header>
+  <div class="unit"><small>UNIT</small>TRMNL // DEVICES</div>
+  <div class="hatch"></div>
+  <div class="status" id="status" data-state="saved"><i></i><span>LOADING</span></div>
+  <a class="nav" href="./">MEMO //</a>
+  <a class="nav" href="swagger/" title="REST API (Swagger UI)">API //</a>
+</header>
+<main id="list"></main>
+
+<template id="card">
+  <section class="card">
+    <h2>
+      <input class="name" maxlength="40" placeholder="unnamed — click to name">
+      <span class="badge"></span>
+      <button type="button" class="forget" title="Forget this device">✕</button>
+    </h2>
+    <dl>
+      <dt>MAC</dt><dd class="mac"></dd>
+      <dt>LAST SEEN</dt><dd class="seen"></dd>
+      <dt>SHOWING</dt><dd class="screen"></dd>
+      <dt>BATTERY</dt><dd class="battery"></dd>
+      <dt>WIFI</dt><dd class="rssi"></dd>
+      <dt>MODEL</dt><dd class="model"></dd>
+      <dt>FIRMWARE</dt><dd class="fw"></dd>
+      <dt>WAKES EVERY</dt><dd class="rate"></dd>
+    </dl>
+    <div class="bar" role="group" aria-label="Screen">
+      <button type="button" data-mode="dashboard">DASHBOARD</button>
+      <button type="button" data-mode="note">MEMO</button>
+    </div>
+    <p class="hint"></p>
+  </section>
+</template>
+
+<script>
+(() => {
+  const list = document.getElementById('list');
+  const tpl = document.getElementById('card');
+  const status = document.getElementById('status');
+  const setStatus = (state, text) => {
+    status.dataset.state = state;
+    status.querySelector('span').textContent = text;
+  };
+  const HINTS = {
+    dashboard: 'Always shows the dashboard.',
+    note: 'Always shows the memo.',
+  };
+  const SCREENS = { dashboard: 'DASHBOARD', note: 'MEMO' };
+
+  const ago = (iso) => {
+    const s = Math.max(0, (Date.now() - new Date(iso)) / 1000);
+    if (s < 60) return 'just now';
+    if (s < 3600) return Math.floor(s / 60) + ' min ago';
+    if (s < 86400) return Math.floor(s / 3600) + ' h ' + Math.floor(s % 3600 / 60) + ' min ago';
+    return Math.floor(s / 86400) + ' d ago';
+  };
+  const dur = (s) => s >= 3600 && s % 3600 === 0 ? s / 3600 + ' h'
+                   : s >= 60 ? Math.round(s / 60) + ' min' : s + ' s';
+  const signal = (dbm) => dbm >= -60 ? 'strong' : dbm >= -70 ? 'ok' : dbm >= -80 ? 'weak' : 'poor';
+
+  // Online while it's been seen within one wake interval (plus slack for
+  // slow wake-ups), late up to three, offline after that.
+  const liveness = (d, refresh) => {
+    if (!d.last_seen) return ['off', 'NEVER'];
+    const s = (Date.now() - new Date(d.last_seen)) / 1000;
+    const every = d.refresh_rate || refresh;
+    if (s < every * 1.5 + 120) return ['on', 'ONLINE'];
+    if (s < every * 3 + 120) return ['late', 'LATE'];
+    return ['off', 'OFFLINE'];
+  };
+
+  async function patch(mac, body) {
+    setStatus('saving', 'SAVING');
+    try {
+      const res = await fetch('api/devices/' + encodeURIComponent(mac), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(res.status);
+      setStatus('saved', 'SAVED');
+      return await res.json();
+    } catch (e) {
+      setStatus('error', 'SAVE FAILED');
+      return null;
+    }
+  }
+
+  function fill(card, d, refresh) {
+    const $ = (sel) => card.querySelector(sel);
+    const name = $('.name');
+    // Don't clobber a name mid-edit on the periodic reload.
+    if (document.activeElement !== name) name.value = d.name;
+    const [cls, label] = liveness(d, refresh);
+    $('.badge').className = 'badge ' + cls;
+    $('.badge').textContent = label;
+    $('.mac').textContent = d.mac;
+    $('.seen').textContent = d.last_seen
+      ? ago(d.last_seen) + ' (' + new Date(d.last_seen).toLocaleString([], { hour12: false }) + ')'
+      : '—';
+    $('.screen').textContent = SCREENS[d.last_screen] || '—';
+    $('.battery').textContent = d.battery_pct != null
+      ? d.battery_pct + '%' + (d.battery_voltage != null ? ' · ' + d.battery_voltage.toFixed(2) + ' V' : '')
+      : '—';
+    $('.rssi').textContent = d.rssi != null ? d.rssi + ' dBm · ' + signal(d.rssi) : '—';
+    $('.fw').textContent = d.firmware || '—';
+    $('.model').textContent = d.model || '—';
+    $('.rate').textContent = dur(d.refresh_rate || refresh);
+    card.querySelectorAll('.bar button').forEach((b) =>
+      b.setAttribute('aria-pressed', String(b.dataset.mode === d.mode)));
+    $('.hint').textContent = HINTS[d.mode] + ' Applies on the next wake-up.';
+  }
+
+  function build(d) {
+    const card = tpl.content.firstElementChild.cloneNode(true);
+    card.dataset.mac = d.mac;
+    const name = card.querySelector('.name');
+    const commit = async () => {
+      if (name.value.trim() === name.dataset.saved) return;
+      const updated = await patch(card.dataset.mac, { name: name.value });
+      if (updated) name.dataset.saved = updated.name;
+    };
+    name.addEventListener('change', commit);
+    name.addEventListener('keydown', (e) => { if (e.key === 'Enter') name.blur(); });
+    card.querySelectorAll('.bar button').forEach((b) => b.addEventListener('click', async () => {
+      const updated = await patch(card.dataset.mac, { mode: b.dataset.mode });
+      if (updated) fill(card, updated, refreshSecs);
+    }));
+    card.querySelector('.forget').addEventListener('click', async () => {
+      if (!confirm('Forget ' + (name.value || card.dataset.mac) +
+                   '? It reappears with default settings if it polls again.')) return;
+      const res = await fetch('api/devices/' + encodeURIComponent(card.dataset.mac), { method: 'DELETE' });
+      if (res.ok || res.status === 404) load();
+      else setStatus('error', 'DELETE FAILED');
+    });
+    return card;
+  }
+
+  let refreshSecs = 3600;
+  async function load() {
+    let body;
+    try {
+      const res = await fetch('api/devices');
+      if (!res.ok) throw new Error(res.status);
+      body = await res.json();
+    } catch (e) {
+      setStatus('error', 'LOAD FAILED');
+      return;
+    }
+    refreshSecs = body.refresh_secs;
+    if (status.dataset.state !== 'saving') {
+      setStatus('saved', body.devices.length + ' DEVICE' + (body.devices.length === 1 ? '' : 'S'));
+    }
+    // Patch cards in place so focus and in-progress edits survive a reload.
+    const seen = new Set();
+    for (const d of body.devices) {
+      seen.add(d.mac);
+      let card = list.querySelector(`.card[data-mac="${CSS.escape(d.mac)}"]`);
+      if (!card) { card = build(d); list.appendChild(card); }
+      card.querySelector('.name').dataset.saved = d.name;
+      fill(card, d, refreshSecs);
+    }
+    list.querySelectorAll('.card').forEach((c) => { if (!seen.has(c.dataset.mac)) c.remove(); });
+    let empty = list.querySelector('.empty');
+    if (!body.devices.length && !empty) {
+      empty = document.createElement('p');
+      empty.className = 'empty';
+      empty.textContent = 'No device has polled yet. Point a TRMNL at this server and it shows up here after its next wake-up.';
+      list.appendChild(empty);
+    } else if (body.devices.length && empty) {
+      empty.remove();
+    }
+  }
+
+  load();
+  setInterval(load, 15000);
+})();
+</script>
+</body>
+</html>

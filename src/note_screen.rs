@@ -747,12 +747,12 @@ fn split_words(text: &str, preserve: bool) -> Vec<String> {
 
 // ── Entry point ─────────────────────────────────────────────────────────────
 
-pub fn render(data: &DashData, note: &Note, battery: u8, rssi: i32) -> anyhow::Result<Vec<u8>> {
+pub fn render(data: &DashData, note: &Note, unit: &str, battery: u8, rssi: i32) -> anyhow::Result<Vec<u8>> {
     let mut c = Canvas::new(crate::render::W, crate::render::H);
     c.fill(C::White);
 
     draw_registration_marks(&mut c);
-    draw_header(&mut c, data);
+    draw_header(&mut c, data, unit);
     draw_header_meta(&mut c, battery, rssi);
     draw_memo(&mut c, note);
     draw_footer(&mut c, data);
@@ -943,7 +943,7 @@ mod tests {
                 .into(),
             updated_at: Some(chrono::Utc::now()),
         };
-        let png = render(&DashData::mock(), &note, 80, -60).unwrap();
+        let png = render(&DashData::mock(), &note, "Kitchen", 80, -60).unwrap();
         assert!(png.starts_with(b"\x89PNG"));
     }
 }

@@ -96,8 +96,9 @@ timezone: "Europe/Berlin"
 # ── Memo editor ───────────────────────────────────────────────────────────
 #
 # The web editor at / saves one markdown memo to $DATA_DIR/note.md,
-# which the device shows as its own screen between dashboard frames. Without
-# persistence the memo lives in an emptyDir and is lost when the pod goes.
+# which the devices assigned to it show full-screen. The per-device
+# assignments made in /devices go to $DATA_DIR/devices.json.
+# Without persistence both live in an emptyDir and are lost when the pod goes.
 #
 # Off by default so turning it on is a deliberate choice of storageClass:
 # a PVC's class and access mode are immutable once created.
