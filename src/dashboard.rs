@@ -28,13 +28,13 @@ fn f_body() -> FontRenderer {
 fn f_body_bold() -> FontRenderer {
     FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvB10_te>()
 }
-fn f_small() -> FontRenderer {
+pub(crate) fn f_small() -> FontRenderer {
     FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvR08_te>()
 }
-fn f_small_bold() -> FontRenderer {
+pub(crate) fn f_small_bold() -> FontRenderer {
     FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvB08_te>()
 }
-fn f_lg_bold() -> FontRenderer {
+pub(crate) fn f_lg_bold() -> FontRenderer {
     FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_helvB14_te>()
 }
 fn f_xl_bold() -> FontRenderer {
@@ -52,9 +52,9 @@ fn f_temperature() -> FontRenderer {
 // ── Text drawing helpers ───────────────────────────────────────────────────
 
 #[derive(Copy, Clone)]
-pub enum Align { Left, Right, Center }
+pub(crate) enum Align { Left, Right, Center }
 
-fn draw_text(
+pub(crate) fn draw_text(
     canvas: &mut Canvas,
     font: &FontRenderer,
     text: &str,
@@ -110,7 +110,7 @@ fn draw_outlined_text(
 /// the ink bounding box stops at the last inked pixel and is *narrower* than
 /// the advance for digits with right-side bearing, which makes a follow-up
 /// glyph land on top of the previous one.
-fn text_width(font: &FontRenderer, text: &str) -> u32 {
+pub(crate) fn text_width(font: &FontRenderer, text: &str) -> u32 {
     font.get_rendered_dimensions(text, Point::zero(), VerticalPosition::Baseline)
         .ok()
         .map(|d| d.advance.x.max(0) as u32)
@@ -134,7 +134,7 @@ pub fn render(data: &DashData, battery: u8, rssi: i32) -> anyhow::Result<Vec<u8>
 
 // ── Registration marks (corner brackets) ───────────────────────────────────
 
-fn draw_registration_marks(c: &mut Canvas) {
+pub(crate) fn draw_registration_marks(c: &mut Canvas) {
     // 8×8 L-shaped 1px brackets in each corner of the live area.
     let tl = (4, 4);
     let tr = (crate::render::W as i32 - 4 - 8, 4);
@@ -157,9 +157,9 @@ fn draw_registration_marks(c: &mut Canvas) {
 
 // ── Header (44px tall) ─────────────────────────────────────────────────────
 
-const HDR_H: u32 = 44;
+pub(crate) const HDR_H: u32 = 44;
 
-fn draw_header(c: &mut Canvas, data: &DashData) {
+pub(crate) fn draw_header(c: &mut Canvas, data: &DashData) {
     // Bottom 3px black border below the whole header
     c.fill_rect(Rect::new(0, HDR_H as i32 - 3, crate::render::W, 3), C::Black);
 
@@ -220,7 +220,7 @@ fn draw_header(c: &mut Canvas, data: &DashData) {
         right_x, 18, C::Black, Align::Right);
 }
 
-pub fn draw_header_meta(c: &mut Canvas, battery: u8, rssi: i32) {
+pub(crate) fn draw_header_meta(c: &mut Canvas, battery: u8, rssi: i32) {
     // Right-aligned BAT % / signal-bar pair on the second header row.
     let right_x = crate::render::W as i32 - 12;
     let baseline = 33;
@@ -261,9 +261,9 @@ pub fn draw_header_meta(c: &mut Canvas, battery: u8, rssi: i32) {
 
 // ── Body ───────────────────────────────────────────────────────────────────
 
-const FTR_H: u32 = 22;
-const BODY_TOP: i32 = HDR_H as i32;
-const BODY_H: u32 = 480 - HDR_H - FTR_H; // = 414
+pub(crate) const FTR_H: u32 = 22;
+pub(crate) const BODY_TOP: i32 = HDR_H as i32;
+pub(crate) const BODY_H: u32 = 480 - HDR_H - FTR_H; // = 414
 const ROW_H: u32 = BODY_H / 2;            // = 207
 
 const COL1_W: u32 = 260;
@@ -319,7 +319,7 @@ fn draw_body(c: &mut Canvas, data: &DashData) {
 /// `NO DATA`) when this panel's upstream is failing. It takes over the seq
 /// slot rather than sitting beside it: the "// NN" is decoration, and on a
 /// 220px column there isn't room for both.
-fn draw_section_header(
+pub(crate) fn draw_section_header(
     c: &mut Canvas,
     panel: Rect,
     en: &str,
@@ -1164,7 +1164,7 @@ fn clip_to_width(font: &FontRenderer, s: &str, max_w: u32) -> String {
 
 // ── Footer (22px tall) ─────────────────────────────────────────────────────
 
-fn draw_footer(c: &mut Canvas, data: &DashData) {
+pub(crate) fn draw_footer(c: &mut Canvas, data: &DashData) {
     let y0 = (480 - FTR_H) as i32;
     c.fill_rect(Rect::new(0, y0, crate::render::W, FTR_H), C::Black);
 

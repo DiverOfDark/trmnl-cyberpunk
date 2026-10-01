@@ -26,8 +26,11 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/trmnl-cyberpunk ./trmnl-cyberpunk
 
+# The memo lives in DATA_DIR; mount a volume there to keep it across restarts.
 ENV LISTEN=0.0.0.0:8080 \
-    RUST_LOG=trmnl_cyberpunk=info
+    RUST_LOG=trmnl_cyberpunk=info \
+    DATA_DIR=/data
+VOLUME /data
 
 EXPOSE 8080
 ENTRYPOINT ["/app/trmnl-cyberpunk"]

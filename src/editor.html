@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TRMNL // MEMO</title>
+<link rel="stylesheet" href="https://uicdn.toast.com/editor/3.2.2/toastui-editor.min.css">
+<style>
+  /* Panel inks, so the page reads as the same object as the device. */
+  :root {
+    --ink: #020202; --paper: #e9eadf; --blue: #002f6b;
+    --yellow: #cdca00; --red: #750a00; --green: #214528;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: grid; grid-template-rows: auto 1fr;
+    background: var(--paper); color: var(--ink);
+    font: 14px/1.4 ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  header {
+    display: flex; align-items: stretch; height: 44px;
+    border-bottom: 3px solid var(--ink);
+  }
+  .unit {
+    background: var(--ink); color: var(--paper);
+    padding: 0 28px 0 12px; display: flex; align-items: center; gap: 8px;
+    clip-path: polygon(0 0, 100% 0, calc(100% - 14px) 100%, 0 100%);
+    font-weight: 700; font-size: 22px; letter-spacing: .02em;
+  }
+  .unit small { font-size: 10px; font-weight: 400; }
+  .hatch {
+    flex: 1;
+    background: repeating-linear-gradient(135deg,
+      var(--red) 0 6px, var(--ink) 6px 8px, var(--red) 8px 14px, var(--paper) 14px 20px);
+  }
+  .status {
+    min-width: 200px; padding: 0 12px; display: flex; align-items: center;
+    justify-content: flex-end; gap: 8px; font-weight: 700; font-size: 12px;
+  }
+  .api {
+    display: flex; align-items: center; padding: 0 12px;
+    border-left: 3px solid var(--ink); color: var(--blue);
+    font-weight: 700; font-size: 12px; text-decoration: none;
+  }
+  .api:hover { background: var(--ink); color: var(--paper); }
+  .status i { width: 8px; height: 8px; background: var(--green); display: inline-block; }
+  .status[data-state="dirty"] i, .status[data-state="saving"] i { background: var(--yellow); }
+  .status[data-state="error"] i { background: var(--red); }
+  .status[data-state="error"] { color: var(--red); }
+
+  /* Stacked by default: the device preview on top at its native 800x480,
+     the editor below. Side by side once the window fits both at full size. */
+  main {
+    display: flex; flex-direction: column; gap: 16px; padding: 16px; min-height: 0;
+  }
+  .editor-wrap {
+    order: 2; flex: 1 0 auto; height: 420px;
+    border: 2px solid var(--ink); background: #fff;
+  }
+  aside { order: 1; display: flex; flex-direction: column; gap: 8px; align-items: center; }
+  .bar { display: flex; gap: 0; align-self: stretch; justify-content: center; }
+  .bar button {
+    font: inherit; font-weight: 700; font-size: 11px; padding: 3px 10px; cursor: pointer;
+    background: var(--paper); color: var(--ink); border: 2px solid var(--ink);
+  }
+  .bar button + button { border-left: 0; }
+  .bar button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+  /* Device bezel around the panel image. */
+  .bezel {
+    padding: 14px; background: #1b1c1a; border-radius: 10px; max-width: 100%;
+    box-shadow: inset 0 0 0 2px #3a3b37;
+  }
+  .bezel img {
+    display: block; width: 800px; max-width: 100%; height: auto; aspect-ratio: 800 / 480;
+    /* Exact pixels: the panel has no antialiasing, so neither should the preview. */
+    image-rendering: pixelated; background: #b3b6ab;
+  }
+  aside p { margin: 0; font-size: 12px; opacity: .75; max-width: 828px; text-align: center; }
+  @media (min-width: 1400px) {
+    body { height: 100%; }
+    main { flex-direction: row; align-items: stretch; }
+    .editor-wrap { order: 1; min-width: 0; height: auto; flex: 1 1 0; }
+    aside { order: 2; }
+  }
+  @media (max-width: 900px) {
+    .hatch { display: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="unit"><small>UNIT</small>TRMNL-01 // MEMO</div>
+  <div class="hatch"></div>
+  <div class="status" id="status" data-state="saved"><i></i><span>LOADING</span></div>
+  <a class="api" href="swagger/" title="REST API (Swagger UI)">API //</a>
+</header>
+<main>
+  <div class="editor-wrap"><div id="editor"></div></div>
+  <aside>
+    <div class="bar" role="group" aria-label="Preview screen">
+      <button type="button" data-screen="note.png" aria-pressed="true">MEMO</button>
+      <button type="button" data-screen="dashboard.png" aria-pressed="false">DASHBOARD</button>
+    </div>
+    <div class="bezel">
+      <img id="preview" width="800" height="480"
+           alt="The screen exactly as the device will render it" src="note.png">
+    </div>
+    <p>Pixel-exact render of the panel, updated as you type. The device shows the memo
+       on its next wake-up, then alternates it with the dashboard. Clear the memo to hide it.</p>
+  </aside>
+</main>
+
+<script src="https://uicdn.toast.com/editor/3.2.2/toastui-editor-all.min.js"></script>
+<script>
+(async () => {
+  const status = document.getElementById('status');
+  const preview = document.getElementById('preview');
+  const setStatus = (state, text) => {
+    status.dataset.state = state;
+    status.querySelector('span').textContent = text;
+  };
+  // Swap the preview only once the new frame has loaded, so it never
+  // blanks between renders.
+  let screen = 'note.png';
+  const refreshPreview = () => {
+    const next = new Image();
+    next.onload = () => { preview.src = next.src; };
+    next.src = screen + '?t=' + Date.now();
+  };
+  document.querySelectorAll('.bar button').forEach((b) => b.addEventListener('click', () => {
+    document.querySelectorAll('.bar button')
+      .forEach((o) => o.setAttribute('aria-pressed', String(o === b)));
+    screen = b.dataset.screen;
+    refreshPreview();
+  }));
+  const clock = (iso) => new Date(iso).toLocaleTimeString([], { hour12: false });
+
+  let saved = '', savedLabel = 'EMPTY';
+  try {
+    const res = await fetch('api/note');
+    if (!res.ok) throw new Error(res.status);
+    const note = await res.json();
+    saved = note.markdown;
+    if (note.updated_at) savedLabel = 'SAVED ' + clock(note.updated_at);
+    setStatus('saved', savedLabel);
+  } catch (e) {
+    setStatus('error', 'LOAD FAILED');
+    return;
+  }
+
+  const editor = new toastui.Editor({
+    el: document.getElementById('editor'),
+    height: '100%',
+    initialEditType: 'wysiwyg',
+    previewStyle: 'tab',
+    initialValue: saved,
+    usageStatistics: false,
+    autofocus: true,
+    toolbarItems: [
+      ['heading', 'bold', 'italic', 'strike'],
+      ['hr', 'quote'],
+      ['ul', 'ol', 'task'],
+      ['table', 'link'],
+      ['code', 'codeblock'],
+    ],
+  });
+
+  // Autosave: one PUT per pause in typing, never two in flight. A change
+  // landing mid-save queues exactly one follow-up with the latest text.
+  let timer = null, inFlight = false, again = false;
+
+  async function save() {
+    if (inFlight) { again = true; return; }
+    const text = editor.getMarkdown();
+    if (text === saved) { setStatus('saved', savedLabel); return; }
+    inFlight = true;
+    setStatus('saving', 'SAVING');
+    try {
+      const res = await fetch('api/note', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'text/markdown; charset=utf-8' },
+        body: text,
+      });
+      if (!res.ok) throw new Error(res.status);
+      const { updated_at } = await res.json();
+      saved = text;
+      savedLabel = 'SAVED ' + clock(updated_at);
+      setStatus('saved', savedLabel);
+      refreshPreview();
+    } catch (e) {
+      setStatus('error', 'SAVE FAILED — RETRYING');
+      setTimeout(save, 3000);
+    } finally {
+      inFlight = false;
+      if (again) { again = false; save(); }
+    }
+  }
+
+  editor.on('change', () => {
+    if (editor.getMarkdown() === saved) return;
+    setStatus('dirty', 'EDITING');
+    clearTimeout(timer);
+    timer = setTimeout(save, 600);
+  });
+
+  // Last-chance flush if the tab closes inside the debounce window.
+  addEventListener('pagehide', () => {
+    const text = editor.getMarkdown();
+    if (text !== saved) {
+      fetch('api/note', { method: 'PUT', body: text, keepalive: true });
+    }
+  });
+})();
+</script>
+</body>
+</html>

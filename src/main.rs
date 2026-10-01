@@ -1,6 +1,8 @@
 mod dashboard;
 mod data;
 mod fetch;
+mod note;
+mod note_screen;
 mod render;
 mod windows_tz;
 
@@ -10,18 +12,22 @@ use std::time::Duration;
 use axum::{
     extract::State,
     http::{header, StatusCode},
-    response::{IntoResponse, Json, Response},
+    response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 use trmnl::{DeviceInfo, DisplayResponse};
+use utoipa::{OpenApi, ToSchema};
+use utoipa_swagger_ui::SwaggerUi;
 
 use data::DashData;
 use fetch::Sources;
+use note::{NoteStore, Playlist, Screen};
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -42,6 +48,8 @@ struct AppState {
     /// can't fan out into a second parallel pull of every upstream.
     fetch_lock: Arc<tokio::sync::Mutex<()>>,
     local_mode: bool,
+    note: Arc<NoteStore>,
+    playlist: Arc<std::sync::Mutex<Playlist>>,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -83,17 +91,23 @@ fn dashboard_filename(epoch: i64) -> String {
 }
 
 /// URL the firmware downloads. Goes through `/dashboard/{epoch}` rather than
-/// `/dashboard-{epoch}.png` because Swagger UI is mounted at `/` and its
-/// wildcard catch-all would otherwise swallow any single-segment request
-/// (and reply 404 because Swagger has no such asset). Slash-separated
-/// segments don't conflict with the UI's wildcard.
+/// `/dashboard-{epoch}.png` because axum 0.8 doesn't allow a literal and a
+/// param in the same path segment.
 fn dashboard_url(epoch: i64) -> String {
     format!("{}/dashboard/{epoch}", base_url())
 }
 
-fn build_display_response(epoch: i64) -> DisplayResponse {
-    DisplayResponse::new(dashboard_url(epoch), dashboard_filename(epoch))
-        .with_refresh_rate(refresh_secs())
+/// Same cache-busting scheme as `dashboard_url`, for the memo screen.
+fn note_url(epoch: i64) -> String {
+    format!("{}/note/{epoch}", base_url())
+}
+
+fn build_display_response(epoch: i64, screen: Screen) -> DisplayResponse {
+    let url = match screen {
+        Screen::Dashboard => dashboard_url(epoch),
+        Screen::Note => note_url(epoch),
+    };
+    DisplayResponse::new(url, dashboard_filename(epoch)).with_refresh_rate(refresh_secs())
 }
 
 // ── Data refresh ──────────────────────────────────────────────────────────────
@@ -139,15 +153,18 @@ async fn refresh_loop(state: AppState) {
     }
 }
 
-/// Render the current `state.data` to a PNG. Called per-request from
-/// `serve_png`, and once at the end of `RENDER_TO=...` mode.
-async fn render_now(state: &AppState) -> anyhow::Result<Vec<u8>> {
+/// Render one screen from the current `state.data` (and memo) to a PNG.
+/// Called per-request from `serve_png` / `serve_note`, and once at the end
+/// of `RENDER_TO=...` mode.
+async fn render_now(state: &AppState, screen: Screen) -> anyhow::Result<Vec<u8>> {
     let mut data = state.data.read().await.clone();
     data.refresh_clock();
     let device = state.device_state.read().await.clone();
+    let note = state.note.get().await;
 
-    let bytes = tokio::task::spawn_blocking(move || {
-        dashboard::render(&data, device.battery_pct, device.rssi)
+    let bytes = tokio::task::spawn_blocking(move || match screen {
+        Screen::Dashboard => dashboard::render(&data, device.battery_pct, device.rssi),
+        Screen::Note => note_screen::render(&data, &note, device.battery_pct, device.rssi),
     })
     .await??;
 
@@ -179,12 +196,14 @@ async fn api_display(State(state): State<AppState>, device: DeviceInfo) -> Json<
         ds.last_seen = chrono::Local::now().format("%H:%M").to_string();
     }
 
-    // No fetch here — the firmware will hit `/dashboard/{epoch}` next, and
-    // `serve_png` refreshes upstream data before rendering. Stamp the URL
-    // with the current timestamp so the firmware's 24h filename-dedupe sees
-    // a new key on every poll and re-downloads.
+    // No fetch here — the firmware downloads the screen's URL next, and that
+    // handler renders from the cache. Stamp the URL with the current
+    // timestamp so the firmware's 24h filename-dedupe sees a new key on
+    // every poll and re-downloads.
+    let has_note = !state.note.get().await.is_empty();
+    let screen = state.playlist.lock().unwrap().next(has_note);
     let epoch = chrono::Utc::now().timestamp();
-    Json(build_display_response(epoch))
+    Json(build_display_response(epoch, screen))
 }
 
 async fn api_log(State(_): State<AppState>, device: DeviceInfo, body: String) -> StatusCode {
@@ -199,12 +218,32 @@ async fn api_log(State(_): State<AppState>, device: DeviceInfo, body: String) ->
     StatusCode::NO_CONTENT
 }
 
+#[utoipa::path(
+    get,
+    path = "/dashboard.png",
+    responses((status = 200, description = "Dashboard screen, rendered from the cache", content_type = "image/png")),
+    tag = "screens",
+)]
 async fn serve_png(State(state): State<AppState>) -> Response {
     // Render straight from the cache the background refresher maintains — the
     // device gets its PNG in milliseconds instead of waiting on upstreams.
     // Anything the refresher couldn't reach is drawn with a STALE marker, so
     // serving cached data never passes as current.
-    match render_now(&state).await {
+    serve_screen(&state, Screen::Dashboard).await
+}
+
+#[utoipa::path(
+    get,
+    path = "/note.png",
+    responses((status = 200, description = "Memo screen, as the device would show it", content_type = "image/png")),
+    tag = "screens",
+)]
+async fn serve_note(State(state): State<AppState>) -> Response {
+    serve_screen(&state, Screen::Note).await
+}
+
+async fn serve_screen(state: &AppState, screen: Screen) -> Response {
+    match render_now(state, screen).await {
         Ok(bytes) => (
             StatusCode::OK,
             [
@@ -221,14 +260,93 @@ async fn serve_png(State(state): State<AppState>) -> Response {
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/refresh",
+    responses((status = 200, description = "Upstreams re-fetched; returns once the pull finishes")),
+    tag = "ops",
+)]
 async fn force_refresh(State(state): State<AppState>) -> impl IntoResponse {
     refresh_data(&state).await;
     Json(json!({ "status": "ok" }))
 }
 
+#[utoipa::path(get, path = "/health", responses((status = 200, description = "Alive")), tag = "ops")]
 async fn health() -> impl IntoResponse {
     Json(json!({ "status": "ok" }))
 }
+
+// ── Memo editor ───────────────────────────────────────────────────────────────
+
+async fn editor() -> Html<&'static str> {
+    Html(include_str!("editor.html"))
+}
+
+#[derive(Serialize, ToSchema)]
+struct NoteDto {
+    markdown: String,
+    /// `null` until the memo has been written once.
+    updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Serialize, ToSchema)]
+struct NoteSaved {
+    updated_at: Option<DateTime<Utc>>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/note",
+    responses((status = 200, description = "The current memo", body = NoteDto)),
+    tag = "memo",
+)]
+async fn get_note(State(state): State<AppState>) -> Json<NoteDto> {
+    let note = state.note.get().await;
+    Json(NoteDto { markdown: note.markdown, updated_at: note.updated_at })
+}
+
+/// Replace the memo. The body is the raw markdown, not JSON, so it's
+/// curl-friendly; the editor PUTs the full text on every pause in typing.
+/// An empty body clears the memo and drops its screen from the rotation.
+#[utoipa::path(
+    put,
+    path = "/api/note",
+    request_body(content = String, content_type = "text/markdown", description = "Full memo markdown"),
+    responses(
+        (status = 200, description = "Saved; the device shows it on its next wake-up", body = NoteSaved),
+        (status = 500, description = "Writing to DATA_DIR failed"),
+    ),
+    tag = "memo",
+)]
+async fn put_note(State(state): State<AppState>, body: String) -> Response {
+    match state.note.set(body).await {
+        Ok(note) => {
+            state.playlist.lock().unwrap().note_edited();
+            Json(NoteSaved { updated_at: note.updated_at }).into_response()
+        }
+        Err(e) => {
+            warn!("saving memo failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "save failed").into_response()
+        }
+    }
+}
+
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "trmnl-cyberpunk",
+        description = "BYOS server for TRMNL e-ink panels. The device-protocol endpoints (`/api/setup`, `/api/display`, `/api/log`) and the cache-busted screen URLs (`/dashboard/{epoch}`, `/note/{epoch}`) are reachable too but are driven by the firmware, so they aren't part of this schema.",
+        version = env!("CARGO_PKG_VERSION"),
+    ),
+    paths(get_note, put_note, serve_png, serve_note, force_refresh, health),
+    components(schemas(NoteDto, NoteSaved)),
+    tags(
+        (name = "memo", description = "Read and write the memo screen's markdown"),
+        (name = "screens", description = "Rendered 800x480 panel images"),
+        (name = "ops", description = "Refresh and health"),
+    ),
+)]
+struct ApiDoc;
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -269,12 +387,16 @@ async fn main() {
         DashData::empty()
     };
 
+    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".into());
+
     let state = AppState {
         device_state: Arc::new(RwLock::new(DeviceState::default())),
         data: Arc::new(RwLock::new(initial_data)),
         sources: Arc::new(Sources::from_env()),
         fetch_lock: Arc::new(tokio::sync::Mutex::new(())),
         local_mode,
+        note: Arc::new(NoteStore::open(&data_dir).await),
+        playlist: Arc::new(std::sync::Mutex::new(Playlist::default())),
     };
 
     let app = Router::new()
@@ -287,8 +409,13 @@ async fn main() {
         // it and renders fresh either way. Slash-separated segments sidestep
         // axum-0.8's "no literals in a param segment" rule.
         .route("/dashboard/{epoch}", get(serve_png))
+        .route("/note.png", get(serve_note))
+        .route("/note/{epoch}", get(serve_note))
         .route("/refresh", get(force_refresh))
         .route("/health", get(health))
+        .route("/", get(editor))
+        .route("/api/note", get(get_note).put(put_note))
+        .merge(SwaggerUi::new("/swagger").url("/openapi.json", ApiDoc::openapi()))
         .with_state(state.clone());
 
     if let Some(path) = render_to {
@@ -296,7 +423,7 @@ async fn main() {
         // mode) then render directly.
         info!("rendering one frame to {path} (mock data)");
         refresh_data(&state).await;
-        let bytes = match render_now(&state).await {
+        let bytes = match render_now(&state, Screen::Dashboard).await {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("render failed: {e}");
@@ -332,5 +459,7 @@ async fn main() {
     );
     info!("Refreshing upstream data every {}s", fetch_interval_secs());
     info!("Image    →  http://{bound}/dashboard.png");
+    info!("Memo     →  http://{bound}/  (stored in {data_dir}/note.md)");
+    info!("API docs →  http://{bound}/swagger");
     axum::serve(listener, app).await.expect("server error");
 }

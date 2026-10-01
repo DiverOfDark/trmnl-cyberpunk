@@ -8,7 +8,9 @@ spec:
   replicas: {{ .Values.replicaCount }}
   revisionHistoryLimit: 1
   strategy:
-    type: RollingUpdate
+    # A ReadWriteOnce memo volume can't attach to the new pod while the old
+    # one still holds it, so a rolling update would wedge on another node.
+    type: {{ if .Values.persistence.enabled }}Recreate{{ else }}RollingUpdate{{ end }}
   selector:
     matchLabels:
       {{- include "trmnl-cyberpunk.selectorLabels" . | nindent 6 }}
@@ -44,6 +46,12 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+          env:
+            - name: DATA_DIR
+              value: {{ .Values.persistence.mountPath | quote }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath }}
           envFrom:
             - configMapRef:
                 name: {{ include "trmnl-cyberpunk.fullname" . }}
@@ -60,6 +68,14 @@ spec:
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (include "trmnl-cyberpunk.fullname" .) }}
+          {{- else }}
+          emptyDir: {}
           {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

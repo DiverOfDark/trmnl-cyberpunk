@@ -18,6 +18,7 @@ The server renders the dashboard pixel-by-pixel in Rust (`embedded-graphics` + u
 - Battery % and RSSI from the device are shown in the dashboard header
 - 4-bit indexed PNG output: every pixel is exactly one of the six panel inks (no dithering, no antialiasing) so the panel renders what we drew
 - Pluggable upstreams: Prometheus + Alertmanager, Nextcloud CalDAV, ActualBudget, Open-Meteo, [trackhound](https://github.com/DiverOfDark/trackhound). Mock fallbacks for everything when env vars are blank
+- Memo screen: write markdown in a WYSIWYG web editor at `/`; it autosaves to disk and the device shows it on its next wake-up
 - Norse-mythology mock hostnames, multi-day weather, calendar agenda, budget categories, alert feed
 
 ### Dashboard panels
@@ -72,6 +73,7 @@ curl http://localhost:8080/refresh
 | `RUST_LOG` | `trmnl_cyberpunk=info` | Log level |
 | `LOCAL_MODE` | _(unset)_ | If set, never fetch upstreams — serve mock data only |
 | `RENDER_TO` | _(unset)_ | If set to a path, render one PNG with mock data, write it, and exit |
+| `DATA_DIR` | `./data` (`/data` in the image) | Where the memo is stored (`note.md`). Mount a volume here |
 
 Upstream-specific env vars (leave blank to use the matching mock data) are documented in `docker-compose.yml`.
 
@@ -96,6 +98,14 @@ The panel carries no month label: the dashboard header two panels over already s
 
 Classification matches the Actual category *group* name against `ACTUALBUDGET_FIXED_GROUPS` / `ACTUALBUDGET_VARIABLE_GROUPS` / `ACTUALBUDGET_SAVINGS_GROUPS` (comma-separated, case-insensitive substrings; sensible English defaults built in), falling back to a per-category transaction-count heuristic when a group name is unrecognized. Income groups are skipped so inflows don't pollute the spend rollups.
 
+### The memo screen
+
+Open the server's root URL (`/`) in a browser and write. The editor is WYSIWYG (Toast UI, loaded from its CDN) and saves the markdown on every pause in typing — there is no save button. Beside it (or above, on narrower windows) is the panel itself: the exact PNG the device will download, at its native 800×480 with no smoothing, refreshed after every save. A toggle switches the preview to the dashboard. The REST API is documented at `/swagger`. The note is written to `$DATA_DIR/note.md`, so it survives restarts and can be edited with plain tools too.
+
+While a memo exists, the device alternates between the dashboard and the memo on each wake-up. A fresh edit jumps the queue: the next wake-up shows the memo regardless of whose turn it was. Clear the memo to drop the screen from the rotation.
+
+The memo is fitted, not scrolled. It's set in the largest of five type sizes that holds the whole note, from Inconsolata 24 for a few lines down to 6×13 for a page of text; anything longer is cut at the last whole line with a red `MORE IN EDITOR` tag. Headings, bold, emphasis (blue), strikethrough, inline and block code, quotes, rules, links, bullet/numbered lists and task lists render. Tables are drawn one row per line. Latin, € and Cyrillic are covered; typographic dashes and quotes fold to ASCII, and other glyphs (emoji) print as `?`.
+
 ---
 
 ## Kubernetes (Helm)
@@ -115,7 +125,12 @@ refreshSecs: "3600"
 trmnlApiKey: "your-secret-key"
 image:
   tag: "main"                          # or a semver tag like "0.1.0"
+persistence:
+  enabled: true                        # PVC for the memo; Recreate strategy
+  size: 64Mi
 ```
+
+With `persistence.enabled` the deployment uses the `Recreate` strategy, since a ReadWriteOnce volume can't attach to the new pod while the old one holds it. The PVC carries `helm.sh/resource-policy: keep`, so uninstalling the release doesn't delete the memo.
 
 ---
 
@@ -170,6 +185,11 @@ To add a real data source, extend `Sources::fetch` in `src/fetch.rs`. The mock d
 | `POST` | `/api/log` | TRMNL device diagnostic logs |
 | `GET` | `/dashboard.png` | Rendered fresh on every request (no cache) |
 | `GET` | `/dashboard/{epoch}` | Same handler; `{epoch}` is the cache-buster the firmware sees |
+| `GET` | `/note.png` | Memo screen, rendered fresh on every request |
+| `GET` | `/note/{epoch}` | Same handler; what `/api/display` points at on memo turns |
+| `GET` | `/` | WYSIWYG memo editor |
+| `GET` | `/swagger` | Swagger UI for the memo, screen and ops endpoints (`/openapi.json`) |
+| `GET` / `PUT` | `/api/note` | Read the memo as JSON / replace it with the raw markdown body |
 | `GET` | `/refresh` | Force an immediate upstream re-fetch |
 | `GET` | `/health` | Health check |
 

@@ -5,6 +5,9 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+    volumes:
+      # The memo written in the editor at / is stored here.
+      - ./data:/data
     environment:
       # URL the TRMNL device will be told to fetch images from.
       # Must be reachable from the device — set to your LAN IP.
