@@ -3,23 +3,23 @@
 //!
 //! ```text
 //! AGENTS // 01 (270)       │ TODAY // 02 (300)       │ OPS // 03   (230)
-//!   CLAUDE  5h % + week    │   NEXT event            │   alerts
-//!   CODEX   5h % + week    │   MEMO (note.md)        ├──────────────────
-//!   tokens · 7 days        │                         │ INBOX // 04
+//!   CLAUDE  5h % + week    │   NEXT event, later     │   alerts
+//!   CODEX   5h % + week    ├─────────────────────────┴──────────────────
+//!   tokens · 7 days        │ MEMO // 04  (530, note.md)
 //! ```
 //!
-//! Text that comes from outside (event titles, mail, the memo) may be in any
+//! Text that comes from outside (event titles, alerts, the memo) may be in any
 //! script, so it's drawn through a `Face` with a Cyrillic fallback rather than
 //! straight Helvetica, which would drop the whole string over one glyph.
 
-use chrono::{DateTime, Datelike, Local, NaiveTime, Utc};
+use chrono::{DateTime, Local, NaiveTime, Utc};
 use u8g2_fonts::{fonts, FontRenderer};
 
 use crate::dashboard::{
     draw_footer_with, draw_header, draw_header_meta, draw_registration_marks, draw_section_header,
     draw_text, f_body_bold, f_lg_bold, f_small, f_small_bold, text_width, Align, BODY_H, BODY_TOP,
 };
-use crate::data::{AgendaItem, AgentUsage, Alert, DashData, InboxData};
+use crate::data::{AgendaItem, AgentUsage, Alert, DashData};
 use crate::note::Note;
 use crate::note_screen::{draw_markdown, task_counts, Face};
 use crate::render::{Canvas, Rect, C};
@@ -29,7 +29,8 @@ const MOTTO: &str = "CONTEXT IS FINITE.";
 const COL1_W: i32 = 270;
 const COL2_W: i32 = 300;
 const COL3_W: i32 = 230;
-const OPS_H: i32 = 207;
+/// Height of the TODAY / OPS strip; the memo spans both columns below it.
+const STRIP_H: i32 = 140;
 const PAD: i32 = 12;
 
 /// Tokens per day over the last seven local days, oldest first, for each
@@ -58,20 +59,20 @@ pub fn render(
     draw_header(&mut c, &header, unit);
     draw_header_meta(&mut c, battery, rssi);
 
-    // Column rules: each column's 2px right border, inside its width.
-    for x in [COL1_W - 2, COL1_W + COL2_W - 2] {
-        c.fill_rect(Rect::new(x, BODY_TOP, 2, BODY_H), C::Black);
-    }
+    // Rules, 2px, inside the panel they close: the agents column, the
+    // TODAY / OPS split, and the strip's bottom edge over the memo.
+    c.fill_rect(Rect::new(COL1_W - 2, BODY_TOP, 2, BODY_H), C::Black);
+    c.fill_rect(Rect::new(COL1_W + COL2_W - 2, BODY_TOP, 2, STRIP_H as u32), C::Black);
     c.fill_rect(
-        Rect::new(COL1_W + COL2_W, BODY_TOP + OPS_H - 2, COL3_W as u32, 2),
+        Rect::new(COL1_W, BODY_TOP + STRIP_H - 2, (COL2_W + COL3_W) as u32, 2),
         C::Black,
     );
 
     let s = &data.status;
     draw_agents(&mut c, data, tokens, s.agents_panel().marker(now).as_deref(), now);
-    draw_today(&mut c, &data.agenda, s.agenda.configured, note, s.agenda.marker(now).as_deref());
+    draw_today(&mut c, &data.agenda, s.agenda.configured, s.agenda.marker(now).as_deref());
     draw_ops(&mut c, &data.alerts, s.alerts.configured, s.ops().marker(now).as_deref());
-    draw_inbox(&mut c, data.inbox.as_ref(), s.inbox.marker(now).as_deref(), now);
+    draw_memo(&mut c, note);
 
     draw_footer_with(&mut c, data, &s.desk_degraded(now));
     c.into_png()
@@ -352,21 +353,20 @@ fn draw_tokens(c: &mut Canvas, t: &TokenWeek, x0: i32, x1: i32, y: i32, bottom: 
 
 // ── TODAY // 02 ─────────────────────────────────────────────────────────────
 
-/// The first timed event still to start today, and the one after it.
-fn next_events(items: &[AgendaItem], now: NaiveTime) -> (Option<&AgendaItem>, Option<&AgendaItem>) {
-    let mut upcoming = items.iter().filter(|e| {
-        NaiveTime::parse_from_str(&e.time, "%H:%M").is_ok_and(|t| t > now)
-    });
-    (upcoming.next(), upcoming.next())
+/// Timed events still to start today, in order.
+fn upcoming(items: &[AgendaItem], now: NaiveTime) -> impl Iterator<Item = &AgendaItem> {
+    items
+        .iter()
+        .filter(move |e| NaiveTime::parse_from_str(&e.time, "%H:%M").is_ok_and(|t| t > now))
 }
 
-fn draw_today(c: &mut Canvas, agenda: &[AgendaItem], calendar: bool, note: &Note, stale: Option<&str>) {
-    let panel = Rect::new(COL1_W, BODY_TOP, (COL2_W - 2) as u32, BODY_H);
+fn draw_today(c: &mut Canvas, agenda: &[AgendaItem], calendar: bool, stale: Option<&str>) {
+    let panel = Rect::new(COL1_W, BODY_TOP, (COL2_W - 2) as u32, (STRIP_H - 2) as u32);
     let mut y = draw_section_header(c, panel, "TODAY", "// 02", stale);
     let (x0, x1) = (panel.x + PAD, panel.right() - PAD);
-    let (sm, smb, title) = (small(), small_bold(), title_bold());
+    let (sm, title) = (small(), title_bold());
 
-    // NEXT: blue time cell, title, and how long until it plus what follows.
+    // NEXT: blue time cell, title, and how long until it.
     let box_h = 44;
     c.stroke_rect(Rect::new(x0, y, (x1 - x0) as u32, box_h as u32), 2, C::Black);
     let cell = Rect::new(x0 + 2, y + 2, 58, (box_h - 4) as u32);
@@ -375,7 +375,8 @@ fn draw_today(c: &mut Canvas, agenda: &[AgendaItem], calendar: bool, note: &Note
     draw_text(c, &f_small_bold(), "NEXT", cx, y + 16, C::White, Align::Center);
 
     let now = Local::now().time();
-    let (next, then) = next_events(agenda, now);
+    let mut events = upcoming(agenda, now);
+    let next = events.next();
     let tx = cell.right() + 8;
     let tw = x1 - 8 - tx;
     let (time, headline, detail) = match next {
@@ -385,44 +386,36 @@ fn draw_today(c: &mut Canvas, agenda: &[AgendaItem], calendar: bool, note: &Note
             if !ev.duration.is_empty() {
                 parts.push(ev.duration.to_uppercase());
             }
-            if let Some(t) = then {
-                parts.push(format!("THEN {} {}", t.time, t.title));
-            }
             (ev.time.clone(), ev.title.clone(), parts.join(" · "))
         }
         None if !calendar => ("--:--".into(), "NO CALENDAR".into(), "SET ICS_URLS".into()),
-        None => {
-            let all_day: Vec<&str> = agenda.iter().filter(|e| e.time == "ALL").map(|e| e.title.as_str()).collect();
-            let detail = if all_day.is_empty() { String::new() } else { format!("ALL DAY: {}", all_day.join(", ")) };
-            ("--:--".into(), "NOTHING ELSE TODAY".into(), detail)
-        }
+        None => ("--:--".into(), "NOTHING ELSE TODAY".into(), String::new()),
     };
     draw_text(c, &f_lg_bold(), &time, cx, y + 35, C::White, Align::Center);
     title.draw(c, &clip(&title, &headline, tw), tx, y + 20, C::Black, false);
     sm.draw(c, &clip(&sm, &detail, tw), tx, y + 34, C::Black, false);
-    y += box_h + 10;
+    y += box_h + 4;
 
-    // MEMO: the note, fitted into whatever's left of the column.
-    draw_text(c, &f_small_bold(), "MEMO", x0, y + 9, C::Black, Align::Left);
-    let (done, total) = task_counts(&note.markdown);
-    if total > 0 {
-        let (d, t) = (done.to_string(), format!(" / {total} DONE"));
-        draw_runs_right(c, &[(&d, &f_small_bold(), C::Black), (&t, &f_small(), C::Black)], x1, y + 9);
-    } else if let Some(t) = note.updated_at {
-        let edited = t.with_timezone(&Local).format("EDITED %d %b %H:%M").to_string().to_uppercase();
-        draw_text(c, &f_small(), &edited, x1, y + 9, C::Black, Align::Right);
+    // What follows, one line each; all-day events close the list.
+    let row_h = 14;
+    let rows = ((panel.bottom() - 4 - y) / row_h).max(0) as usize;
+    let all_day = agenda.iter().filter(|e| e.time == "ALL");
+    let later: Vec<(&str, &AgendaItem)> = events
+        .map(|e| (e.time.as_str(), e))
+        .chain(all_day.map(|e| ("ALL", e)))
+        .collect();
+    let shown = if later.len() > rows { rows.saturating_sub(1) } else { later.len() };
+    for (i, (time, ev)) in later.iter().take(shown).enumerate() {
+        let base = y + i as i32 * row_h + 10;
+        draw_text(c, &f_small_bold(), time, x0, base, C::Black, Align::Left);
+        let dur_w = text_width(&f_small(), &ev.duration) as i32;
+        draw_text(c, &f_small(), &ev.duration, x1, base, C::Black, Align::Right);
+        sm.draw(c, &clip(&sm, &ev.title, x1 - dur_w - 6 - (x0 + 36)), x0 + 36, base, C::Black, false);
     }
-    y += 13;
-    c.hline(x0, y, (x1 - x0) as u32, C::Black);
-    y += 7;
-
-    if note.is_empty() {
-        draw_text(c, &f_lg_bold(), "NO MEMO", x0, y + 18, C::Black, Align::Left);
-        smb.draw(c, "WRITE ONE AT / ON THIS SERVER", x0, y + 34, C::Black, false);
-        return;
+    if shown < later.len() {
+        let more = format!("+{} MORE TODAY", later.len() - shown);
+        draw_text(c, &f_small(), &more, x0, y + shown as i32 * row_h + 10, C::Black, Align::Left);
     }
-    let area = Rect::new(x0, y, (x1 - x0) as u32, (panel.bottom() - 8 - y).max(0) as u32);
-    draw_markdown(c, &note.markdown, area, 2);
 }
 
 // ── OPS // 03 ───────────────────────────────────────────────────────────────
@@ -440,7 +433,7 @@ fn split_alert(message: &str) -> (String, String) {
 }
 
 fn draw_ops(c: &mut Canvas, alerts: &[Alert], configured: bool, stale: Option<&str>) {
-    let panel = Rect::new(COL1_W + COL2_W, BODY_TOP, COL3_W as u32, (OPS_H - 2) as u32);
+    let panel = Rect::new(COL1_W + COL2_W, BODY_TOP, COL3_W as u32, (STRIP_H - 2) as u32);
     let y = draw_section_header(c, panel, "OPS", "// 03", stale);
     let (x0, x1) = (panel.x + PAD, panel.right() - PAD);
     let (sm, smb) = (small(), small_bold());
@@ -452,11 +445,10 @@ fn draw_ops(c: &mut Canvas, alerts: &[Alert], configured: bool, stale: Option<&s
         return;
     }
 
-    let row_h = 31;
-    let more_h = 12;
-    let room = panel.bottom() - 4 - y;
-    let fits = (room / row_h) as usize;
-    let shown = if alerts.len() > fits { ((room - more_h) / row_h).max(0) as usize } else { alerts.len() };
+    // One line per alert: level pill, target in bold, what, time.
+    let row_h = 15;
+    let rows = ((panel.bottom() - 4 - y) / row_h).max(0) as usize;
+    let shown = if alerts.len() > rows { rows.saturating_sub(1) } else { alerts.len() };
     for (i, a) in alerts.iter().take(shown).enumerate() {
         let ry = y + i as i32 * row_h;
         let (bg, fg) = match a.level.as_str() {
@@ -468,70 +460,47 @@ fn draw_ops(c: &mut Canvas, alerts: &[Alert], configured: bool, stale: Option<&s
         draw_text(c, &f_small_bold(), &a.level, x0 + 15, ry + 10, fg, Align::Center);
 
         let tx = x0 + 36;
-        let age_w = text_width(&f_small(), &a.time) as i32;
+        let right = x1 - text_width(&f_small(), &a.time) as i32 - 6;
         draw_text(c, &f_small(), &a.time, x1, ry + 10, C::Black, Align::Right);
         let (target, what) = split_alert(&a.message);
-        smb.draw(c, &clip(&smb, &target, x1 - age_w - 6 - tx), tx, ry + 10, C::Black, false);
-        sm.draw(c, &clip(&sm, &what, x1 - tx), tx, ry + 22, C::Black, false);
+        let target = clip(&smb, &target, (right - tx) * 3 / 5);
+        smb.draw(c, &target, tx, ry + 10, C::Black, false);
+        let wx = tx + smb.width(&target) + 5;
+        sm.draw(c, &clip(&sm, &what, right - wx), wx, ry + 10, C::Black, false);
     }
     if shown < alerts.len() {
         let more = format!("+{} MORE", alerts.len() - shown);
-        draw_text(c, &f_small(), &more, x0, panel.bottom() - 6, C::Black, Align::Left);
+        draw_text(c, &f_small(), &more, x0, y + shown as i32 * row_h + 10, C::Black, Align::Left);
     }
 }
 
-// ── INBOX // 04 ─────────────────────────────────────────────────────────────
+// ── MEMO // 04 ──────────────────────────────────────────────────────────────
 
-/// `13:05` today, `TUE` this week, `28 SEP` before that.
-fn mail_time(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let (local, today) = (t.with_timezone(&Local), now.with_timezone(&Local));
-    let days = (today.date_naive() - local.date_naive()).num_days();
-    match days {
-        d if d <= 0 => local.format("%H:%M").to_string(),
-        d if d < 7 => local.format("%a").to_string().to_uppercase(),
-        _ => format!("{} {}", local.day(), local.format("%b").to_string().to_uppercase()),
-    }
-}
+/// Largest memo type size on this screen (an index into the memo tiers): the
+/// 8x13 face. The memo shares the panel with three others, so it reads as a
+/// list rather than a poster, and long notes keep more lines on screen.
+const MEMO_LARGEST_TIER: usize = 3;
 
-fn draw_inbox(c: &mut Canvas, inbox: Option<&InboxData>, stale: Option<&str>, now: DateTime<Utc>) {
-    let panel = Rect::new(COL1_W + COL2_W, BODY_TOP + OPS_H, COL3_W as u32, (BODY_H as i32 - OPS_H) as u32);
-    let mut y = draw_section_header(c, panel, "INBOX", "// 04", stale);
-    let (x0, x1) = (panel.x + PAD, panel.right() - PAD);
-    let (sm, smb) = (small(), small_bold());
-
-    let Some(inbox) = inbox else {
-        draw_text(c, &f_title(), "NO MAILBOX", x0, y + 16, C::Black, Align::Left);
-        draw_text(c, &f_small(), "IMAP_HOST NOT SET", x0, y + 30, C::Black, Align::Left);
-        return;
-    };
-
-    let n = inbox.unread.to_string();
-    draw_text(c, &f_hero(), &n, x0, y + 32, C::Black, Align::Left);
-    let lx = x0 + text_width(&f_hero(), &n) as i32 + 8;
-    draw_text(c, &f_small_bold(), "UNREAD", lx, y + 18, C::Black, Align::Left);
-    if inbox.unread > 0 {
-        let p = inbox.people.to_string();
-        let color = if inbox.people > 0 { C::Red } else { C::Black };
-        draw_runs(c, &[(&p, &f_small_bold(), color), (" FROM PEOPLE", &f_small(), C::Black)], lx, y + 31);
+fn draw_memo(c: &mut Canvas, note: &Note) {
+    let panel = Rect::new(COL1_W, BODY_TOP + STRIP_H, (COL2_W + COL3_W) as u32, (BODY_H as i32 - STRIP_H) as u32);
+    let (done, total) = task_counts(&note.markdown);
+    let label = if total > 0 {
+        format!("{done} / {total} DONE")
     } else {
-        draw_text(c, &f_small(), "NOTHING NEW", lx, y + 31, C::Black, Align::Left);
-    }
-    y += 40;
+        note.updated_at
+            .map(|t| t.with_timezone(&Local).format("EDITED %d %b %H:%M").to_string().to_uppercase())
+            .unwrap_or_else(|| "// 04".into())
+    };
+    let y = draw_section_header(c, panel, "MEMO", &label, None);
+    let (x0, x1) = (panel.x + PAD, panel.right() - PAD);
 
-    let row_h = 33;
-    for m in &inbox.recent {
-        if y + row_h - 6 > panel.bottom() - 4 {
-            break;
-        }
-        c.hline(x0, y, (x1 - x0) as u32, C::Black);
-        let when = mail_time(m.received, now);
-        draw_text(c, &f_small(), &when, x1, y + 13, C::Black, Align::Right);
-        let fw = x1 - text_width(&f_small(), &when) as i32 - 6 - x0;
-        let from_color = if m.person { C::Red } else { C::Black };
-        smb.draw(c, &clip(&smb, &m.from, fw), x0, y + 13, from_color, false);
-        sm.draw(c, &clip(&sm, &m.subject, x1 - x0), x0, y + 25, C::Black, false);
-        y += row_h;
+    if note.is_empty() {
+        draw_text(c, &f_lg_bold(), "NO MEMO", x0, y + 18, C::Black, Align::Left);
+        small_bold().draw(c, "WRITE ONE AT / ON THIS SERVER", x0, y + 34, C::Black, false);
+        return;
     }
+    let area = Rect::new(x0, y, (x1 - x0) as u32, (panel.bottom() - 6 - y).max(0) as u32);
+    draw_markdown(c, &note.markdown, area, MEMO_LARGEST_TIER);
 }
 
 #[cfg(test)]
@@ -543,14 +512,13 @@ mod tests {
     }
 
     #[test]
-    fn next_skips_started_and_all_day_events() {
+    fn upcoming_skips_started_and_all_day_events() {
         let items = [ev("ALL", "Holiday"), ev("09:00", "Gym"), ev("15:30", "Standup"), ev("17:00", "UPS")];
         let now = NaiveTime::from_hms_opt(14, 27, 0).unwrap();
-        let (next, then) = next_events(&items, now);
-        assert_eq!(next.unwrap().title, "Standup");
-        assert_eq!(then.unwrap().title, "UPS");
+        let titles: Vec<_> = upcoming(&items, now).map(|e| e.title.as_str()).collect();
+        assert_eq!(titles, ["Standup", "UPS"]);
         let late = NaiveTime::from_hms_opt(18, 0, 0).unwrap();
-        assert!(next_events(&items, late).0.is_none());
+        assert!(upcoming(&items, late).next().is_none());
     }
 
     #[test]

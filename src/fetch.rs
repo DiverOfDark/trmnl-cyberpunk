@@ -9,7 +9,6 @@ use tracing::{info, warn};
 
 use crate::agents::Agents;
 use crate::data::*;
-use crate::inbox::Imap;
 
 // ── Sources config ─────────────────────────────────────────────────────────
 
@@ -150,7 +149,6 @@ pub struct Sources {
     /// Claude / Codex logins for the desk screen's rate limits, shared with
     /// the sign-in endpoints behind `/agents`.
     pub agents: std::sync::Arc<Agents>,
-    pub imap: Option<Imap>,
 }
 
 impl Sources {
@@ -212,7 +210,6 @@ impl Sources {
                 .unwrap_or_else(|_| "Europe/Berlin".into()),
             trackhound_base_url: base_url_env("TRACKHOUND_BASE_URL"),
             agents: std::sync::Arc::new(Agents::new(data_dir)),
-            imap: Imap::from_env(),
         }
     }
 
@@ -223,7 +220,7 @@ impl Sources {
         let t = section_timeout();
         let (
             (hosts_r, cluster_r, weather_r, alerts_r, budget_r, agenda_r, shipments_r),
-            (claude_r, codex_r, inbox_r),
+            (claude_r, codex_r),
         ) = tokio::join!(
             async {
                 tokio::join!(
@@ -240,7 +237,6 @@ impl Sources {
                 tokio::join!(
                     tokio::time::timeout(t, self.agents.claude()),
                     tokio::time::timeout(t, self.agents.codex()),
-                    tokio::time::timeout(t, Imap::fetch(self.imap.as_ref())),
                 )
             },
         );
@@ -313,14 +309,6 @@ impl Sources {
             p.codex,
             stamp,
         );
-        let (inbox, s_inbox) = resolve(
-            "inbox",
-            inbox_r.map(|r| r.map(Some)),
-            prev.inbox.clone(),
-            None,
-            p.inbox,
-            stamp,
-        );
         let status = Status {
             hosts: s_hosts,
             cluster: s_cluster,
@@ -331,7 +319,6 @@ impl Sources {
             shipments: s_shipments,
             claude: s_claude,
             codex: s_codex,
-            inbox: s_inbox,
         };
 
         let now = Local::now();
@@ -370,7 +357,6 @@ impl Sources {
             shipments_due_today,
             claude,
             codex,
-            inbox,
             status,
         }
     }

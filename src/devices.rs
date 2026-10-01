@@ -28,7 +28,7 @@ pub enum Mode {
     Dashboard,
     /// Always the memo (its empty-state screen when there is none).
     Note,
-    /// The desk screen: agent limits, next event + memo, alerts, inbox.
+    /// The desk screen: agent limits, today's events, alerts and the memo.
     Desk,
 }
 

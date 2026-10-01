@@ -19,7 +19,7 @@ The server renders the dashboard pixel-by-pixel in Rust (`embedded-graphics` + u
 - 4-bit indexed PNG output: every pixel is exactly one of the six panel inks (no dithering, no antialiasing) so the panel renders what we drew
 - Pluggable upstreams: Prometheus + Alertmanager, Nextcloud CalDAV, ActualBudget, Open-Meteo, [trackhound](https://github.com/DiverOfDark/trackhound). Mock fallbacks for everything when env vars are blank
 - Memo screen: write markdown in a WYSIWYG web editor at `/`; it autosaves to disk and the device shows it on its next wake-up
-- Desk screen: Claude and Codex rate limits with a 7-day token chart, the next calendar event over the memo, alerts, and unread mail
+- Desk screen: Claude and Codex rate limits with a 7-day token chart, today's events and alerts, and the memo across the bottom
 - Multiple devices: `/devices` lists every panel with its last battery, signal, firmware and check-in time, and assigns each one the dashboard, the memo or the desk screen
 - Norse-mythology mock hostnames, multi-day weather, calendar agenda, budget categories, alert feed
 
@@ -76,7 +76,6 @@ curl http://localhost:8080/refresh
 | `LOCAL_MODE` | _(unset)_ | If set, never fetch upstreams — serve mock data only |
 | `RENDER_TO` | _(unset)_ | If set to a path, render one PNG with mock data, write it, and exit |
 | `DATA_DIR` | `./data` (`/data` in the image) | Where the memo (`note.md`) and device settings (`devices.json`) are stored. Mount a volume here |
-| `IMAP_HOST` / `IMAP_PORT` / `IMAP_USER` / `IMAP_PASSWORD` / `IMAP_MAILBOX` | _(unset)_ / `993` / / / `INBOX` | Desk screen inbox: unread mail over IMAP with implicit TLS |
 | `FIRMWARE_UPDATE` | _(on)_ | Set to `false` to stop offering the bundled firmware as an OTA update |
 | `FIRMWARE_MODEL` | `reterminal_e1002` | Device `Model` header the bundled firmware is offered to |
 | `FIRMWARE_DIR` | `/app/firmware` | Directory with `firmware.bin` + `version.txt` |
@@ -119,9 +118,9 @@ The memo is fitted, not scrolled. It's set in the largest of five type sizes tha
 Assign **DESK** to a panel on `/devices`, or preview it at `/desk.png`. It's built for a panel on a work desk:
 
 - **AGENTS** — for Claude and Codex each: the 5-hour session window as a big percent, with a hatched tail showing where it ends up at the current rate (`PROJ`); the weekly window with a red tick at even pace, and an `OVER PACE` / `ON PACE` / `UNDER PACE` verdict (±5 points). A spent window turns into a red `LIMITED · BACK 16:40`. Below, tokens per day for the last seven days, Codex stacked under Claude; today is hatched because it isn't over.
-- **TODAY** — the next timed event, how long until it, its length and what follows; under it, the memo, fitted to the column, with a `2 / 7 DONE` count when it has task-list items.
-- **OPS** — the same Alertmanager alerts as the dashboard, two lines each.
-- **INBOX** — unread count, how many are from people, and up to three of them, people first. A message counts as a person's unless it carries list headers (`List-Id`, `List-Unsubscribe`, `Precedence: bulk`, `Auto-Submitted`) or comes from a robot address (`noreply@`, `notifications@`, `billing@`, …). The mailbox is opened read-only, so nothing is marked as read.
+- **TODAY** — the next timed event and how long until it, then the rest of today's events one line each, all-day events last.
+- **OPS** — the same Alertmanager alerts as the dashboard, one line each.
+- **MEMO** — the memo across the full width under those two, with a `2 / 7 DONE` count when it has task-list items. It's fitted like the memo screen but starts at the 8×13 face, so it reads as a list rather than a poster.
 
 **Rate limits** come from the same endpoints the CLIs use for `/usage`. Sign the server in on **`/agents`** (linked from the editor and devices pages):
 

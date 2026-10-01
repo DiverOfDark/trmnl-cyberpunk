@@ -93,7 +93,6 @@ pub struct Status {
     pub shipments: SectionStatus,
     pub claude: SectionStatus,
     pub codex: SectionStatus,
-    pub inbox: SectionStatus,
 }
 
 impl Status {
@@ -104,7 +103,7 @@ impl Status {
         Self {
             hosts: f, cluster: f, weather: f, alerts: f,
             budget: f, agenda: f, shipments: f,
-            claude: f, codex: f, inbox: f,
+            claude: f, codex: f,
         }
     }
 
@@ -130,7 +129,7 @@ impl Status {
         [
             self.hosts, self.cluster, self.weather, self.alerts,
             self.budget, self.agenda, self.shipments,
-            self.claude, self.codex, self.inbox,
+            self.claude, self.codex,
         ]
         .into_iter()
         .filter_map(|s| s.last_ok)
@@ -161,7 +160,6 @@ impl Status {
             ("AGENTS", self.agents_panel()),
             ("NEXT", self.agenda),
             ("OPS", self.ops()),
-            ("INBOX", self.inbox),
         ])
     }
 
@@ -472,27 +470,6 @@ impl AgentUsage {
     }
 }
 
-/// One unread message for the inbox panel.
-#[derive(Clone, Serialize)]
-pub struct MailItem {
-    /// Sender display name, or the address's local part without one.
-    pub from: String,
-    pub subject: String,
-    pub received: DateTime<Utc>,
-    /// Written by a person rather than a list, a shop or a robot.
-    pub person: bool,
-}
-
-#[derive(Clone, Default, Serialize)]
-pub struct InboxData {
-    /// Unseen messages in the mailbox.
-    pub unread: u32,
-    /// Of the unread messages looked at, how many came from people.
-    pub people: u32,
-    /// The unread messages worth listing: people first, then newest first.
-    pub recent: Vec<MailItem>,
-}
-
 #[derive(Clone, Serialize)]
 pub struct DashData {
     pub time: String,
@@ -519,8 +496,6 @@ pub struct DashData {
     /// provider's credentials aren't configured.
     pub claude: Option<AgentUsage>,
     pub codex: Option<AgentUsage>,
-    /// Unread mail for the desk screen. `None` when IMAP isn't configured.
-    pub inbox: Option<InboxData>,
     /// Per-source freshness of everything above. The dashboard is rendered
     /// from cache, so this is how the panel admits when what it's showing is
     /// older than it looks.
@@ -606,7 +581,6 @@ impl DashData {
             shipments_due_today: Vec::new(),
             claude: None,
             codex: None,
-            inbox: None,
             status: Status::default(),
         };
         d.refresh_clock();
@@ -765,15 +739,6 @@ impl DashData {
                 week_resets: Some(Utc::now() + chrono::Duration::hours(45)),
                 week_window_secs: 7 * 86_400,
                 limited: false,
-            }),
-            inbox: Some(InboxData {
-                unread: 7,
-                people: 2,
-                recent: vec![
-                    MailItem { from: "Landlord".into(), subject: "Heating inspection on Friday".into(), received: Utc::now() - chrono::Duration::minutes(82), person: true },
-                    MailItem { from: "A.".into(), subject: "Re: Saturday plans".into(), received: Utc::now() - chrono::Duration::minutes(155), person: true },
-                    MailItem { from: "Hetzner".into(), subject: "Invoice 2026-09 available".into(), received: Utc::now() - chrono::Duration::minutes(315), person: false },
-                ],
             }),
             // Mock data is fabricated on the spot, so nothing is ever stale.
             status: Status::all_fresh(Utc::now()),

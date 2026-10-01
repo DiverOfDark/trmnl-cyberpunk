@@ -5,7 +5,6 @@ mod desk;
 mod devices;
 mod fetch;
 mod firmware;
-mod inbox;
 mod note;
 mod note_screen;
 mod render;
@@ -278,7 +277,7 @@ async fn serve_note(State(state): State<AppState>) -> Response {
 #[utoipa::path(
     get,
     path = "/desk.png",
-    responses((status = 200, description = "Desk screen: agent limits, next event and memo, alerts, inbox", content_type = "image/png")),
+    responses((status = 200, description = "Desk screen: agent limits, today's events, alerts and the memo", content_type = "image/png")),
     tag = "screens",
 )]
 async fn serve_desk(State(state): State<AppState>) -> Response {
