@@ -5,21 +5,21 @@
 //! AGENTS // 01 (270)       │ TODAY // 02 (300)       │ OPS // 03   (230)
 //!   CLAUDE  5h % + week    │   NEXT event, later     │   alerts
 //!   CODEX   5h % + week    ├─────────────────────────┴──────────────────
-//!   tokens · 7 days        │ MEMO // 04  (530, note.md)
+//!   GitHub heatmap         │ MEMO // 04  (530, note.md)
 //! ```
 //!
 //! Text that comes from outside (event titles, alerts, the memo) may be in any
 //! script, so it's drawn through a `Face` with a Cyrillic fallback rather than
 //! straight Helvetica, which would drop the whole string over one glyph.
 
-use chrono::{DateTime, Local, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, Local, NaiveTime, Utc};
 use u8g2_fonts::{fonts, FontRenderer};
 
 use crate::dashboard::{
     draw_footer_with, draw_header, draw_header_meta, draw_registration_marks, draw_section_header,
     draw_text, f_body_bold, f_lg_bold, f_small, f_small_bold, text_width, Align, BODY_H, BODY_TOP,
 };
-use crate::data::{AgendaItem, AgentUsage, Alert, DashData};
+use crate::data::{AgendaItem, AgentUsage, Alert, DashData, GithubData};
 use crate::note::Note;
 use crate::note_screen::{draw_markdown, task_counts, Face};
 use crate::render::{Canvas, Rect, C};
@@ -33,17 +33,8 @@ const COL3_W: i32 = 230;
 const STRIP_H: i32 = 140;
 const PAD: i32 = 12;
 
-/// Tokens per day over the last seven local days, oldest first, for each
-/// agent that has had a history pushed.
-#[derive(Default)]
-pub struct TokenWeek {
-    pub claude: Option<[u64; 7]>,
-    pub codex: Option<[u64; 7]>,
-}
-
 pub fn render(
     data: &DashData,
-    tokens: &TokenWeek,
     note: &Note,
     unit: &str,
     battery: u8,
@@ -69,7 +60,7 @@ pub fn render(
     );
 
     let s = &data.status;
-    draw_agents(&mut c, data, tokens, s.agents_panel().marker(now).as_deref(), now);
+    draw_agents(&mut c, data, s.agents_panel().marker(now).as_deref(), now);
     draw_today(&mut c, &data.agenda, s.agenda.configured, s.agenda.marker(now).as_deref());
     draw_ops(&mut c, &data.alerts, s.alerts.configured, s.ops().marker(now).as_deref());
     draw_memo(&mut c, note);
@@ -182,7 +173,7 @@ fn span(minutes: i64) -> String {
 
 // ── AGENTS // 01 ────────────────────────────────────────────────────────────
 
-fn draw_agents(c: &mut Canvas, data: &DashData, tokens: &TokenWeek, stale: Option<&str>, now: DateTime<Utc>) {
+fn draw_agents(c: &mut Canvas, data: &DashData, stale: Option<&str>, now: DateTime<Utc>) {
     let panel = Rect::new(0, BODY_TOP, (COL1_W - 2) as u32, BODY_H);
     let mut y = draw_section_header(c, panel, "AGENTS", "// 01", stale);
     let (x0, x1) = (PAD, panel.right() - PAD);
@@ -200,7 +191,7 @@ fn draw_agents(c: &mut Canvas, data: &DashData, tokens: &TokenWeek, stale: Optio
         y = draw_agent(c, a, ink, x0, x1, y, now) + 8;
     }
 
-    draw_tokens(c, tokens, x0, x1, y, panel.bottom() - 6);
+    draw_heatmap(c, data.github.as_ref(), x0, x1, y, panel.bottom() - 6);
 }
 
 /// One agent's block; returns the y below its closing rule.
@@ -288,66 +279,82 @@ fn draw_bar(c: &mut Canvas, r: Rect, pct: u8, proj: Option<u8>, ink: C) {
     }
 }
 
-/// Stacked daily token bars, Codex under Claude, today hatched because it
-/// isn't over yet.
-fn draw_tokens(c: &mut Canvas, t: &TokenWeek, x0: i32, x1: i32, y: i32, bottom: i32) {
+/// The GitHub contribution calendar for as many recent weeks as fit: a
+/// column per week (Sunday on top, as on GitHub), today at the right edge
+/// in a red frame. GitHub's 0..4 levels (quartiles of the user's own year)
+/// step from a dot through green half-tone, solid green and a green/black
+/// half-tone to solid black, so even the commonest level reads as filled.
+fn draw_heatmap(c: &mut Canvas, gh: Option<&GithubData>, x0: i32, x1: i32, y: i32, bottom: i32) {
     let (sm, smb) = (f_small(), f_small_bold());
-    draw_text(c, &smb, "TOKENS · 7 DAYS", x0, y + 9, C::Black, Align::Left);
-    // Legend, right to left.
-    let mut lx = x1;
-    for (name, ink, has) in [("CODEX", C::Blue, t.codex.is_some()), ("CLAUDE", C::Black, t.claude.is_some())] {
-        if !has {
-            continue;
-        }
-        draw_text(c, &sm, name, lx, y + 9, C::Black, Align::Right);
-        lx -= text_width(&sm, name) as i32 + 12;
-        c.fill_rect(Rect::new(lx, y + 1, 8, 8), ink);
-        lx -= 8;
-    }
+    let Some(gh) = gh else {
+        draw_text(c, &smb, "GITHUB", x0, y + 9, C::Black, Align::Left);
+        draw_text(c, &sm, "SET GITHUB_USER", x0, y + 23, C::Black, Align::Left);
+        return;
+    };
 
     let labels_h = 12;
-    let top = y + 17;
-    let base = bottom - labels_h - 4; // chart's bottom rule
-    let chart_h = (base - top).clamp(24, 140);
-    let top = base - chart_h;
-    c.fill_rect(Rect::new(x0, base, (x1 - x0) as u32, 2), C::Black);
+    let top = y + 16;
+    // Cells stay GitHub-sized when there's room to spare; more weeks beat
+    // bigger squares.
+    let pitch = ((bottom - labels_h - top) / 7).clamp(5, 13);
+    let labels_base = top + 7 * pitch + 9;
+    let gap = if pitch >= 8 { 2 } else { 1 };
+    let cell = pitch - gap;
+    let weeks = ((x1 - x0 + gap) / pitch).max(1);
+    let gx = x1 - weeks * pitch + gap;
 
-    let claude = t.claude.unwrap_or_default();
-    let codex = t.codex.unwrap_or_default();
-    let max = (0..7).map(|i| claude[i] + codex[i]).max().unwrap_or(0);
-    let gap = 6;
-    let bar_w = ((x1 - x0) - gap * 6) as f32 / 7.0;
     let today = Local::now().date_naive();
-    let plot_h = chart_h - 4;
+    let this_week = today - chrono::Duration::days(today.weekday().num_days_from_sunday() as i64);
+    let first = this_week - chrono::Duration::weeks(weeks as i64 - 1);
+    let by_date: std::collections::HashMap<_, _> = gh.days.iter().map(|d| (d.date, d)).collect();
 
-    if max == 0 {
-        let msg = if t.claude.is_none() && t.codex.is_none() { "NO HISTORY PUSHED" } else { "NO TOKENS THIS WEEK" };
-        draw_text(c, &sm, msg, (x0 + x1) / 2, top + chart_h / 2 + 4, C::Black, Align::Center);
-    }
-    for i in 0..7 {
-        let bx = x0 + (i as f32 * (bar_w + gap as f32)).round() as i32;
-        let bw = bar_w.round() as u32;
-        let is_today = i == 6;
-        let h = |v: u64| if max == 0 { 0 } else { (v as f64 / max as f64 * plot_h as f64).round() as i32 };
-        let (h_codex, h_claude) = (h(codex[i]), h(claude[i]));
-        let mut seg_bottom = base;
-        for (seg_h, ink) in [(h_codex, C::Blue), (h_claude, C::Black)] {
-            if seg_h <= 0 {
-                continue;
+    let mut total = 0u32;
+    let mut month_end = i32::MIN; // right edge of the last month label
+    for w in 0..weeks {
+        let start = first + chrono::Duration::weeks(w as i64);
+        let cx = gx + w * pitch;
+        // Month label under the first column holding the 1st of a month.
+        if (0..7).any(|d| (start + chrono::Duration::days(d)).day() == 1) || w == 0 {
+            let month = (start + chrono::Duration::days(6)).format("%b").to_string().to_uppercase();
+            if cx > month_end + 4 && cx + text_width(&sm, &month) as i32 <= x1 {
+                draw_text(c, &sm, &month, cx, labels_base, C::Black, Align::Left);
+                month_end = cx + text_width(&sm, &month) as i32;
             }
-            let r = Rect::new(bx, seg_bottom - seg_h, bw, seg_h as u32);
-            if is_today {
-                c.hatch_135(r, &[(2, ink), (2, C::White)]);
-            } else {
-                c.fill_rect(r, ink);
-            }
-            seg_bottom -= seg_h;
         }
+        for d in 0..7 {
+            let date = start + chrono::Duration::days(d);
+            if date > today {
+                break;
+            }
+            let r = Rect::new(cx, top + d as i32 * pitch, cell as u32, cell as u32);
+            let day = by_date.get(&date);
+            total += day.map_or(0, |d| d.count);
+            match day.map_or(0, |d| d.level) {
+                0 => c.fill_rect(Rect::new(r.x + cell / 2 - 1, r.y + cell / 2 - 1, 2, 2), C::Black),
+                1 => checker(c, r, C::Green, C::White),
+                2 => c.fill_rect(r, C::Green),
+                3 => checker(c, r, C::Black, C::Green),
+                _ => c.fill_rect(r, C::Black),
+            }
+            if date == today {
+                c.stroke_rect(Rect::new(r.x - 1, r.y - 1, (cell + 2) as u32, (cell + 2) as u32), 1, C::Red);
+            }
+        }
+    }
 
-        let day = today - chrono::Duration::days(6 - i as i64);
-        let label = day.format("%a").to_string().to_uppercase();
-        let font = if is_today { &smb } else { &sm };
-        draw_text(c, font, &label, bx + bw as i32 / 2, bottom - 2, C::Black, Align::Center);
+    let summary = format!("{total} IN {weeks}W");
+    draw_text(c, &sm, &summary, x1, y + 9, C::Black, Align::Right);
+    let title_w = x1 - text_width(&sm, &summary) as i32 - 8 - x0;
+    let user = clip(&small(), &format!(" · {}", gh.user), title_w - text_width(&smb, "GITHUB") as i32);
+    draw_runs(c, &[("GITHUB", &smb, C::Black), (&user, &sm, C::Black)], x0, y + 9);
+}
+
+/// Half-tone: alternate pixels of `a` and `b`.
+fn checker(c: &mut Canvas, r: Rect, a: C, b: C) {
+    for py in r.y..r.bottom() {
+        for px in r.x..r.right() {
+            c.put(px, py, if (px + py) % 2 == 0 { a } else { b });
+        }
     }
 }
 
@@ -543,19 +550,15 @@ mod tests {
 
     #[test]
     fn renders_mock_and_empty_states() {
-        let tokens = TokenWeek {
-            claude: Some([2_800_000, 1_100_000, 400_000, 0, 5_200_000, 6_300_000, 4_100_000]),
-            codex: Some([900_000, 1_600_000, 0, 300_000, 600_000, 1_800_000, 700_000]),
-        };
         let note = Note { markdown: "- [x] Rotate certs\n- [ ] Renew домен\n\nCall *Anna* re: UPS".into(), updated_at: Some(Utc::now()) };
-        let png = render(&DashData::mock(), &tokens, &note, "Desk", 84, -60).unwrap();
+        let png = render(&DashData::mock(), &note, "Desk", 84, -60).unwrap();
         assert!(png.starts_with(b"\x89PNG"));
 
         let mut limited = DashData::mock();
         if let Some(c) = limited.codex.as_mut() {
             c.limited = true;
         }
-        render(&limited, &TokenWeek::default(), &Note::default(), "", 0, 0).unwrap();
-        render(&DashData::empty(), &TokenWeek::default(), &Note::default(), "", 0, 0).unwrap();
+        render(&limited, &Note::default(), "", 0, 0).unwrap();
+        render(&DashData::empty(), &Note::default(), "", 0, 0).unwrap();
     }
 }

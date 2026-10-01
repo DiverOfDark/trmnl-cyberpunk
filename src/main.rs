@@ -5,6 +5,7 @@ mod desk;
 mod devices;
 mod fetch;
 mod firmware;
+mod github;
 mod note;
 mod note_screen;
 mod render;
@@ -14,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
@@ -29,7 +30,7 @@ use trmnl::{DeviceInfo, DisplayResponse};
 use utoipa::{OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 
-use agents::{Agents, LoginStatus, Pending, Provider, TokenStore};
+use agents::{Agents, LoginStatus, Pending, Provider};
 use data::DashData;
 use devices::{device_key, Device, DevicePatch, DeviceStore, Mode};
 use fetch::Sources;
@@ -51,8 +52,6 @@ struct AppState {
     devices: Arc<DeviceStore>,
     /// Claude / Codex sign-ins (the same logins the fetcher reads usage with).
     agents: Arc<Agents>,
-    /// Daily token counts pushed in for the desk screen's chart.
-    tokens: Arc<TokenStore>,
     /// Patched firmware build offered to the device as an OTA update.
     firmware: Option<Arc<Firmware>>,
 }
@@ -176,15 +175,11 @@ async fn render_now(state: &AppState, screen: Screen, device: Option<&str>) -> a
     let rssi = device.as_ref().and_then(|d| d.rssi).unwrap_or(0);
     let unit = device.map(|d| d.name).unwrap_or_default();
     let note = state.note.get().await;
-    let tokens = desk::TokenWeek {
-        claude: state.tokens.week(Provider::Claude).await,
-        codex: state.tokens.week(Provider::Codex).await,
-    };
 
     let bytes = tokio::task::spawn_blocking(move || match screen {
         Screen::Dashboard => dashboard::render(&data, &unit, battery, rssi),
         Screen::Note => note_screen::render(&data, &note, &unit, battery, rssi),
-        Screen::Desk => desk::render(&data, &tokens, &note, &unit, battery, rssi),
+        Screen::Desk => desk::render(&data, &note, &unit, battery, rssi),
     })
     .await??;
 
@@ -538,61 +533,6 @@ fn spawn_refresh(state: &AppState) {
     tokio::spawn(async move { refresh_data(&state).await });
 }
 
-// ── Agent token history ───────────────────────────────────────────────────────
-
-#[derive(Deserialize, utoipa::IntoParams)]
-struct TokensQuery {
-    /// Name of the machine pushing; pushes from different machines are summed.
-    #[serde(default = "default_source")]
-    source: String,
-}
-
-fn default_source() -> String {
-    "default".into()
-}
-
-#[derive(Serialize, ToSchema)]
-struct TokensSaved {
-    days: usize,
-}
-
-/// Record daily token counts for the desk screen's chart. The body is the
-/// output of `ccusage claude daily --json` or `ccusage codex daily --json`,
-/// unchanged.
-#[utoipa::path(
-    put,
-    path = "/api/agents/{provider}/tokens",
-    params(
-        ("provider" = String, Path, description = "`claude` or `codex`"),
-        TokensQuery,
-    ),
-    request_body(content = String, content_type = "application/json", description = "ccusage `daily --json` output"),
-    responses(
-        (status = 200, description = "Recorded", body = TokensSaved),
-        (status = 400, description = "Unknown provider, or a body ccusage didn't write"),
-        (status = 500, description = "Writing to DATA_DIR failed"),
-    ),
-    tag = "agents",
-)]
-async fn put_tokens(
-    State(state): State<AppState>,
-    Path(provider): Path<String>,
-    Query(q): Query<TokensQuery>,
-    body: String,
-) -> Response {
-    let Some(provider) = Provider::parse(&provider) else {
-        return bad_provider();
-    };
-    match state.tokens.record(provider, q.source.trim(), &body).await {
-        Ok(days) => Json(TokensSaved { days }).into_response(),
-        Err(e) if e.downcast_ref::<std::io::Error>().is_some() => {
-            warn!("saving token history failed: {e:#}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "save failed").into_response()
-        }
-        Err(e) => (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
-    }
-}
-
 // ── Devices ───────────────────────────────────────────────────────────────────
 
 async fn devices_page() -> Html<&'static str> {
@@ -676,12 +616,12 @@ async fn delete_device(State(state): State<AppState>, Path(mac): Path<String>) -
         description = "BYOS server for TRMNL e-ink panels. The device-protocol endpoints (`/api/setup`, `/api/display`, `/api/log`) and the cache-busted screen URLs (`/dashboard/{epoch}`, `/note/{epoch}`) are reachable too but are driven by the firmware, so they aren't part of this schema.",
         version = env!("CARGO_PKG_VERSION"),
     ),
-    paths(get_note, put_note, list_devices, patch_device, delete_device, list_agents, start_login, finish_claude, sign_out, put_tokens, serve_png, serve_note, serve_desk, force_refresh, health),
-    components(schemas(NoteDto, NoteSaved, DevicesDto, Device, DevicePatch, Mode, Screen, TokensSaved, AgentDto, LoginStatus, Pending, PastedCode)),
+    paths(get_note, put_note, list_devices, patch_device, delete_device, list_agents, start_login, finish_claude, sign_out, serve_png, serve_note, serve_desk, force_refresh, health),
+    components(schemas(NoteDto, NoteSaved, DevicesDto, Device, DevicePatch, Mode, Screen, AgentDto, LoginStatus, Pending, PastedCode)),
     tags(
         (name = "memo", description = "Read and write the memo screen's markdown"),
         (name = "devices", description = "Registered panels, their last status, and which screen each shows"),
-        (name = "agents", description = "Claude / Codex sign-in and token history for the desk screen"),
+        (name = "agents", description = "Claude / Codex sign-in for the desk screen"),
         (name = "screens", description = "Rendered 800x480 panel images"),
         (name = "ops", description = "Refresh and health"),
     ),
@@ -738,7 +678,6 @@ async fn main() {
         local_mode,
         note: Arc::new(NoteStore::open(&data_dir).await),
         devices: Arc::new(DeviceStore::open(&data_dir).await),
-        tokens: Arc::new(TokenStore::open(&data_dir).await),
         firmware: if render_to.is_some() { None } else { Firmware::from_env().map(Arc::new) },
     };
 
@@ -764,7 +703,6 @@ async fn main() {
         .route("/api/agents", get(list_agents))
         .route("/api/agents/claude/code", post(finish_claude))
         .route("/api/agents/{provider}/login", post(start_login).delete(sign_out))
-        .route("/api/agents/{provider}/tokens", axum::routing::put(put_tokens))
         .route("/firmware/{file}", get(serve_firmware))
         .route("/refresh", get(force_refresh))
         .route("/health", get(health))

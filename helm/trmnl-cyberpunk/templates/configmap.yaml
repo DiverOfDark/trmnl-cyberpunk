@@ -27,3 +27,4 @@ data:
   WEATHER_LON: {{ .Values.weatherLon | default "13.33" | quote }}
   WEATHER_TZ: {{ .Values.weatherTz | default "Europe/Berlin" | quote }}
   TRACKHOUND_BASE_URL: {{ .Values.trackhoundBaseUrl | default "" | quote }}
+  GITHUB_USER: {{ .Values.githubUser | default "" | quote }}

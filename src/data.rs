@@ -93,6 +93,7 @@ pub struct Status {
     pub shipments: SectionStatus,
     pub claude: SectionStatus,
     pub codex: SectionStatus,
+    pub github: SectionStatus,
 }
 
 impl Status {
@@ -103,7 +104,7 @@ impl Status {
         Self {
             hosts: f, cluster: f, weather: f, alerts: f,
             budget: f, agenda: f, shipments: f,
-            claude: f, codex: f,
+            claude: f, codex: f, github: f,
         }
     }
 
@@ -129,7 +130,7 @@ impl Status {
         [
             self.hosts, self.cluster, self.weather, self.alerts,
             self.budget, self.agenda, self.shipments,
-            self.claude, self.codex,
+            self.claude, self.codex, self.github,
         ]
         .into_iter()
         .filter_map(|s| s.last_ok)
@@ -160,6 +161,7 @@ impl Status {
             ("AGENTS", self.agents_panel()),
             ("NEXT", self.agenda),
             ("OPS", self.ops()),
+            ("GITHUB", self.github),
         ])
     }
 
@@ -470,6 +472,22 @@ impl AgentUsage {
     }
 }
 
+/// One day of the GitHub contribution calendar.
+#[derive(Clone, Copy, Serialize)]
+pub struct ContributionDay {
+    pub date: chrono::NaiveDate,
+    /// GitHub's own 0..4 intensity bucket, relative to the user's year.
+    pub level: u8,
+    pub count: u32,
+}
+
+#[derive(Clone, Serialize)]
+pub struct GithubData {
+    pub user: String,
+    /// About a year of days, oldest first.
+    pub days: Vec<ContributionDay>,
+}
+
 #[derive(Clone, Serialize)]
 pub struct DashData {
     pub time: String,
@@ -496,6 +514,9 @@ pub struct DashData {
     /// provider's credentials aren't configured.
     pub claude: Option<AgentUsage>,
     pub codex: Option<AgentUsage>,
+    /// GitHub contribution calendar for the desk screen. `None` when
+    /// `GITHUB_USER` isn't set.
+    pub github: Option<GithubData>,
     /// Per-source freshness of everything above. The dashboard is rendered
     /// from cache, so this is how the panel admits when what it's showing is
     /// older than it looks.
@@ -581,6 +602,7 @@ impl DashData {
             shipments_due_today: Vec::new(),
             claude: None,
             codex: None,
+            github: None,
             status: Status::default(),
         };
         d.refresh_clock();
@@ -739,6 +761,21 @@ impl DashData {
                 week_resets: Some(Utc::now() + chrono::Duration::hours(45)),
                 week_window_secs: 7 * 86_400,
                 limited: false,
+            }),
+            github: Some(GithubData {
+                user: "octocat".into(),
+                // A year of weekday-heavy activity with a quiet stretch,
+                // deterministic so previews don't flicker.
+                days: (0..365)
+                    .map(|i| {
+                        let date = now.date_naive() - chrono::Duration::days(364 - i);
+                        let wd = date.weekday().num_days_from_monday() as i64;
+                        let quiet = (200..215).contains(&i);
+                        let count = if quiet || wd >= 5 && i % 3 != 0 { 0 } else { ((i * 7 + wd * 5) % 13) as u32 };
+                        let level = match count { 0 => 0, 1..=3 => 1, 4..=6 => 2, 7..=9 => 3, _ => 4 };
+                        ContributionDay { date, level, count }
+                    })
+                    .collect(),
             }),
             // Mock data is fabricated on the spot, so nothing is ever stale.
             status: Status::all_fresh(Utc::now()),

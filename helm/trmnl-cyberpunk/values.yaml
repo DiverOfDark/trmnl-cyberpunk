@@ -147,6 +147,10 @@ weatherTz: "Europe/Berlin"
 # See https://github.com/DiverOfDark/trackhound
 trackhoundBaseUrl: ""
 
+# GitHub account whose contribution heatmap the desk screen shows (public
+# profile calendar, no token needed).
+githubUser: ""
+
 # ── Secrets ──────────────────────────────────────────────────────────────
 #
 # Two ways to feed the deployment's `envFrom` Secret:

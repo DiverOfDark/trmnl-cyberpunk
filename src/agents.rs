@@ -1,6 +1,5 @@
 //! Coding-agent usage for the desk screen: Claude and Codex rate limits,
-//! pulled with logins made from the web UI (`/agents`), plus a per-day token
-//! history that machines running the agents push in.
+//! pulled with logins made from the web UI (`/agents`).
 //!
 //! **Logins.** The server signs in to each subscription the way its CLI does,
 //! as an app of its own — a separate login, so it never shares (and never
@@ -15,11 +14,6 @@
 //!
 //! **Limits.** Both subscriptions expose the numbers their CLIs show on
 //! `/usage` / `/status`: a rolling 5-hour session window and a weekly one.
-//!
-//! **Tokens.** Neither subscription reports tokens per day; the transcripts on
-//! the machines running the agents do. `ccusage` reads them, and its
-//! `ccusage {claude,codex} daily --json` output is PUT to
-//! `/api/agents/{provider}/tokens` as-is (`scripts/push-agent-tokens.sh`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -27,9 +21,9 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
-use chrono::{DateTime, Local, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use reqwest::{Client, StatusCode};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -818,126 +812,6 @@ fn parse_codex(v: &Value, now: DateTime<Utc>) -> Result<AgentUsage> {
     })
 }
 
-// ── Token history ────────────────────────────────────────────────────────────
-
-/// Days kept; the panel shows seven, the rest is slack for late pushes.
-const KEEP_DAYS: i64 = 31;
-
-/// provider → source machine → day → tokens.
-type History = BTreeMap<String, BTreeMap<String, BTreeMap<NaiveDate, u64>>>;
-
-#[derive(Default, Serialize, Deserialize)]
-struct HistoryFile {
-    #[serde(default)]
-    providers: History,
-}
-
-/// Daily token counts pushed in from the machines running the agents,
-/// persisted as `$DATA_DIR/agent-tokens.json`.
-pub struct TokenStore {
-    path: PathBuf,
-    history: Mutex<History>,
-}
-
-impl TokenStore {
-    pub async fn open(data_dir: impl Into<PathBuf>) -> Self {
-        let path = data_dir.into().join("agent-tokens.json");
-        let history = match tokio::fs::read_to_string(&path).await {
-            Ok(text) => serde_json::from_str::<HistoryFile>(&text)
-                .map(|f| f.providers)
-                .unwrap_or_else(|e| {
-                    warn!("ignoring malformed {}: {e}", path.display());
-                    History::new()
-                }),
-            Err(_) => History::new(),
-        };
-        Self {
-            path,
-            history: Mutex::new(history),
-        }
-    }
-
-    /// Record a push. Days in the push replace what `source` said about them
-    /// before (ccusage reports whole days, so the newest count wins); days it
-    /// leaves out are kept. Returns how many days were recorded.
-    pub async fn record(&self, provider: Provider, source: &str, body: &str) -> Result<usize> {
-        let days = parse_daily(body)?;
-        let mut history = self.history.lock().await;
-        let per_source = history
-            .entry(provider.key().to_string())
-            .or_default()
-            .entry(source.to_string())
-            .or_default();
-        per_source.extend(days.iter().copied());
-        let cutoff = Local::now().date_naive() - chrono::Duration::days(KEEP_DAYS);
-        for sources in history.values_mut() {
-            for days in sources.values_mut() {
-                days.retain(|d, _| *d >= cutoff);
-            }
-        }
-        let file = HistoryFile { providers: history.clone() };
-        if let Some(dir) = self.path.parent() {
-            tokio::fs::create_dir_all(dir).await?;
-        }
-        let tmp = self.path.with_extension("json.tmp");
-        tokio::fs::write(&tmp, serde_json::to_vec_pretty(&file)?).await?;
-        tokio::fs::rename(&tmp, &self.path).await?;
-        Ok(days.len())
-    }
-
-    /// Tokens per day for the last seven local days, oldest first, summed
-    /// over every source. `None` when nobody has pushed for `provider`.
-    pub async fn week(&self, provider: Provider) -> Option<[u64; 7]> {
-        let history = self.history.lock().await;
-        let sources = history.get(provider.key()).filter(|s| !s.is_empty())?;
-        let today = Local::now().date_naive();
-        let mut out = [0u64; 7];
-        for (i, slot) in out.iter_mut().enumerate() {
-            let day = today - chrono::Duration::days(6 - i as i64);
-            *slot = sources.values().filter_map(|d| d.get(&day)).sum();
-        }
-        Some(out)
-    }
-}
-
-/// Day → total tokens out of `ccusage claude daily --json` /
-/// `ccusage codex daily --json`: a `daily` array (or a bare array) of objects
-/// with a date and a token total. Field names and date formats are read
-/// leniently, since ccusage versions don't agree on them.
-fn parse_daily(body: &str) -> Result<Vec<(NaiveDate, u64)>> {
-    let v: Value = serde_json::from_str(body).context("body is not JSON")?;
-    let rows = v["daily"]
-        .as_array()
-        .or_else(|| v.as_array())
-        .ok_or_else(|| anyhow!("expected a `daily` array"))?;
-    rows.iter()
-        .map(|r| {
-            let date = ["date", "period", "day"]
-                .iter()
-                .find_map(|k| r[*k].as_str())
-                .ok_or_else(|| anyhow!("row without a date: {r}"))?;
-            let date = parse_day(date).ok_or_else(|| anyhow!("unrecognized date {date:?}"))?;
-            let tokens = ["totalTokens", "total_tokens", "tokens"]
-                .iter()
-                .find_map(|k| r[*k].as_u64())
-                .ok_or_else(|| anyhow!("row without totalTokens: {r}"))?;
-            Ok((date, tokens))
-        })
-        .collect()
-}
-
-fn parse_day(s: &str) -> Option<NaiveDate> {
-    let s = s.trim();
-    ["%Y-%m-%d", "%Y%m%d", "%b %d, %Y", "%B %d, %Y", "%d %b %Y"]
-        .iter()
-        .find_map(|f| NaiveDate::parse_from_str(s, f).ok())
-        .or_else(|| {
-            DateTime::parse_from_rfc3339(s)
-                .ok()
-                .map(|t| Local.from_utc_datetime(&t.naive_utc()).date_naive())
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1043,39 +917,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn reads_both_ccusage_shapes() {
-        let claude = r#"{"daily":[{"date":"2026-09-29","inputTokens":1,"totalTokens":6300000},
-                                  {"date":"2026-09-30","totalTokens":4100000}],"totals":{}}"#;
-        assert_eq!(
-            parse_daily(claude).unwrap(),
-            vec![
-                (NaiveDate::from_ymd_opt(2026, 9, 29).unwrap(), 6_300_000),
-                (NaiveDate::from_ymd_opt(2026, 9, 30).unwrap(), 4_100_000),
-            ]
-        );
-        let codex = r#"{"daily":[{"period":"Sep 30, 2026","totalTokens":700000}]}"#;
-        assert_eq!(
-            parse_daily(codex).unwrap(),
-            vec![(NaiveDate::from_ymd_opt(2026, 9, 30).unwrap(), 700_000)]
-        );
-        assert!(parse_daily(r#"{"daily":[{"date":"yesterday","totalTokens":1}]}"#).is_err());
-    }
 
-    #[tokio::test]
-    async fn sources_sum_and_repushes_replace() {
-        let dir = std::env::temp_dir().join(format!("trmnl-tokens-{}", std::process::id()));
-        let store = TokenStore::open(&dir).await;
-        let today = Local::now().date_naive().format("%Y-%m-%d");
-        let push = |n: u64| format!(r#"{{"daily":[{{"date":"{today}","totalTokens":{n}}}]}}"#);
-        store.record(Provider::Claude, "laptop", &push(100)).await.unwrap();
-        store.record(Provider::Claude, "desktop", &push(50)).await.unwrap();
-        store.record(Provider::Claude, "laptop", &push(300)).await.unwrap();
-        assert_eq!(store.week(Provider::Claude).await.unwrap()[6], 350);
-        assert_eq!(store.week(Provider::Codex).await, None);
-        let reopened = TokenStore::open(&dir).await;
-        assert_eq!(reopened.week(Provider::Claude).await.unwrap()[6], 350);
-        let _ = std::fs::remove_dir_all(dir);
-    }
 
 }
