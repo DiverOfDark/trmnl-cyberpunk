@@ -2,7 +2,7 @@
 //! the same header and footer as the dashboard.
 //!
 //! ```text
-//! AGENTS // 01 (270)       │ TODAY // 02 (300)       │ OPS // 03   (230)
+//! AGENTS // 01 (270)       │ TODAY // 02 (240)    │ OPS // 03      (290)
 //!   CLAUDE  5h % + week    │   NEXT event, later     │   alerts
 //!   CODEX   5h % + week    ├─────────────────────────┴──────────────────
 //!   GitHub heatmap         │ MEMO // 04  (530, note.md)
@@ -27,8 +27,8 @@ use crate::render::{Canvas, Rect, C};
 const MOTTO: &str = "CONTEXT IS FINITE.";
 
 const COL1_W: i32 = 270;
-const COL2_W: i32 = 300;
-const COL3_W: i32 = 230;
+const COL2_W: i32 = 240;
+const COL3_W: i32 = 290;
 /// Height of the TODAY / OPS strip; the memo spans both columns below it.
 const STRIP_H: i32 = 140;
 const PAD: i32 = 12;
@@ -82,6 +82,13 @@ fn small() -> Face {
 fn small_bold() -> Face {
     Face::new(
         vec![FontRenderer::new::<fonts::u8g2_font_helvB08_te>(), FontRenderer::new::<fonts::u8g2_font_6x13B_t_cyrillic>()],
+        0,
+        0,
+    )
+}
+fn body_bold() -> Face {
+    Face::new(
+        vec![FontRenderer::new::<fonts::u8g2_font_helvB10_te>(), FontRenderer::new::<fonts::u8g2_font_7x13_t_cyrillic>()],
         0,
         0,
     )
@@ -441,9 +448,18 @@ fn split_alert(message: &str) -> (String, String) {
 
 fn draw_ops(c: &mut Canvas, alerts: &[Alert], configured: bool, stale: Option<&str>) {
     let panel = Rect::new(COL1_W + COL2_W, BODY_TOP, COL3_W as u32, (STRIP_H - 2) as u32);
-    let y = draw_section_header(c, panel, "OPS", "// 03", stale);
+    // The header counts everything firing, so alerts that don't fit below
+    // still register.
+    let errs = alerts.iter().filter(|a| a.level == "ERR").count();
+    let counts = match (errs, alerts.len() - errs) {
+        (0, 0) => "// 03".to_string(),
+        (e, 0) => format!("{e} ERR"),
+        (0, w) => format!("{w} WRN"),
+        (e, w) => format!("{e} ERR · {w} WRN"),
+    };
+    let y = draw_section_header(c, panel, "OPS", &counts, stale);
     let (x0, x1) = (panel.x + PAD, panel.right() - PAD);
-    let (sm, smb) = (small(), small_bold());
+    let (sm, what_face) = (small(), body_bold());
 
     if alerts.is_empty() {
         let (head, sub) = if configured { ("ALL CLEAR", "NO FIRING ALERTS") } else { ("NO ALERTS", "ALERTMANAGER_URL NOT SET") };
@@ -452,32 +468,28 @@ fn draw_ops(c: &mut Canvas, alerts: &[Alert], configured: bool, stale: Option<&s
         return;
     }
 
-    // One line per alert: level pill, target in bold, what, time.
-    let row_h = 15;
-    let rows = ((panel.bottom() - 4 - y) / row_h).max(0) as usize;
-    let shown = if alerts.len() > rows { rows.saturating_sub(1) } else { alerts.len() };
-    for (i, a) in alerts.iter().take(shown).enumerate() {
+    // Two lines per alert, ERR first: what's wrong in bold, then where and
+    // since when.
+    let row_h = 31;
+    let rows = (((panel.bottom() - y) / row_h).max(1)) as usize;
+    for (i, a) in alerts.iter().take(rows).enumerate() {
         let ry = y + i as i32 * row_h;
         let (bg, fg) = match a.level.as_str() {
             "ERR" => (C::Red, C::White),
             "WRN" => (C::Yellow, C::Black),
             _ => (C::Black, C::White),
         };
-        c.fill_rect(Rect::new(x0, ry, 30, 12), bg);
-        draw_text(c, &f_small_bold(), &a.level, x0 + 15, ry + 10, fg, Align::Center);
+        c.fill_rect(Rect::new(x0, ry, 32, 26), bg);
+        draw_text(c, &f_small_bold(), &a.level, x0 + 16, ry + 17, fg, Align::Center);
 
-        let tx = x0 + 36;
-        let right = x1 - text_width(&f_small(), &a.time) as i32 - 6;
-        draw_text(c, &f_small(), &a.time, x1, ry + 10, C::Black, Align::Right);
+        let tx = x0 + 38;
         let (target, what) = split_alert(&a.message);
-        let target = clip(&smb, &target, (right - tx) * 3 / 5);
-        smb.draw(c, &target, tx, ry + 10, C::Black, false);
-        let wx = tx + smb.width(&target) + 5;
-        sm.draw(c, &clip(&sm, &what, right - wx), wx, ry + 10, C::Black, false);
-    }
-    if shown < alerts.len() {
-        let more = format!("+{} MORE", alerts.len() - shown);
-        draw_text(c, &f_small(), &more, x0, y + shown as i32 * row_h + 10, C::Black, Align::Left);
+        let (what, target) = if what.is_empty() { (target, String::new()) } else { (what, target) };
+        what_face.draw(c, &clip(&what_face, &what, x1 - tx), tx, ry + 11, C::Black, false);
+        let since = format!("SINCE {}", a.time);
+        draw_text(c, &f_small(), &since, x1, ry + 24, C::Black, Align::Right);
+        let tw = x1 - text_width(&f_small(), &since) as i32 - 6 - tx;
+        sm.draw(c, &clip(&sm, &target, tw), tx, ry + 24, C::Black, false);
     }
 }
 
