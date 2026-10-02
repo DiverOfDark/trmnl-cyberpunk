@@ -121,7 +121,7 @@ Assign **DESK** to a panel on `/devices`, or preview it at `/desk.png`. It's bui
 - **AGENTS** — for Claude and Codex each: the 5-hour session window as a big percent, with a hatched tail showing where it ends up at the current rate (`PROJ`); the weekly window with a red tick at even pace, and an `OVER PACE` / `ON PACE` / `UNDER PACE` verdict (±5 points). A spent window turns into a red `LIMITED · BACK 16:40`. Below, the GitHub contribution heatmap.
 - **TODAY** — the next timed event and how long until it, then the rest of today's events one line each, all-day events last.
 - **OPS** — the same Alertmanager alerts as the dashboard, errors first: what fired in bold, then where and since when. The header counts everything firing (`2 ERR · 3 WRN`), so alerts that don't fit still register.
-- **MEMO** — the memo across the full width under those two, with a `2 / 7 DONE` count when it has task-list items. It's fitted like the memo screen but between the 8×13 and 7×13 faces, so it reads as a list rather than a poster.
+- **MEMO** — the memo across the full width under those two, with a `2 / 7 DONE` count when it has task-list items. It's fitted like the memo screen but starts at the 9×15 face, stepping down to 8×13 and 7×13 for longer notes, so it reads as a list rather than a poster.
 
 **Rate limits** come from the same endpoints the CLIs use for `/usage`. Sign the server in on **`/agents`** (linked from the editor and devices pages):
 

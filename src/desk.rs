@@ -496,9 +496,9 @@ fn draw_ops(c: &mut Canvas, alerts: &[Alert], configured: bool, stale: Option<&s
 // ── MEMO // 04 ──────────────────────────────────────────────────────────────
 
 /// Largest memo type size on this screen (an index into the memo tiers): the
-/// 8x13 face. The memo shares the panel with three others, so it reads as a
-/// list rather than a poster, and long notes keep more lines on screen.
-const MEMO_LARGEST_TIER: usize = 3;
+/// 9x15 face. The memo shares the panel with three others, so it reads as a
+/// list rather than a poster; longer notes still step down to 8x13 and 7x13.
+const MEMO_LARGEST_TIER: usize = 2;
 
 fn draw_memo(c: &mut Canvas, note: &Note) {
     let panel = Rect::new(COL1_W, BODY_TOP + STRIP_H, (COL2_W + COL3_W) as u32, (BODY_H as i32 - STRIP_H) as u32);
