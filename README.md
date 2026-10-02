@@ -110,7 +110,7 @@ Open the server's root URL (`/`) in a browser and write. The editor is WYSIWYG (
 
 Which devices show the memo is set per device on the devices page (below); a device assigned to it shows the memo on every wake-up, and its empty state while there is none.
 
-The memo is fitted, not scrolled. It's set in the largest of five type sizes that holds the whole note, from Inconsolata 24 for a few lines down to 6×13 for a page of text; anything longer is cut at the last whole line with a red `MORE IN EDITOR` tag. Headings, bold, emphasis (blue), strikethrough, inline and block code, quotes, rules, links, bullet/numbered lists and task lists render. Tables are drawn one row per line. Latin, € and Cyrillic are covered; typographic dashes and quotes fold to ASCII, and other glyphs (emoji) print as `?`.
+The memo is fitted, not scrolled. It's set in the largest of five type sizes that holds the whole note, from Inconsolata 24 for a few lines down to 7×13 for a page of text; anything longer is cut at the last whole line with a red `MORE IN EDITOR` tag. Headings, bold, emphasis (blue), strikethrough, inline and block code, quotes, rules, links, bullet/numbered lists and task lists render. Tables are drawn one row per line. Latin, € and Cyrillic are covered; typographic dashes and quotes fold to ASCII, and other glyphs (emoji) print as `?`.
 
 ### The desk screen
 
@@ -121,7 +121,7 @@ Assign **DESK** to a panel on `/devices`, or preview it at `/desk.png`. It's bui
 - **AGENTS** — for Claude and Codex each: the 5-hour session window as a big percent, with a hatched tail showing where it ends up at the current rate (`PROJ`); the weekly window with a red tick at even pace, and an `OVER PACE` / `ON PACE` / `UNDER PACE` verdict (±5 points). A spent window turns into a red `LIMITED · BACK 16:40`. Below, the GitHub contribution heatmap.
 - **TODAY** — the next timed event and how long until it, then the rest of today's events one line each, all-day events last.
 - **OPS** — the same Alertmanager alerts as the dashboard, errors first: what fired in bold, then where and since when. The header counts everything firing (`2 ERR · 3 WRN`), so alerts that don't fit still register.
-- **MEMO** — the memo across the full width under those two, with a `2 / 7 DONE` count when it has task-list items. It's fitted like the memo screen but starts at the 8×13 face, so it reads as a list rather than a poster.
+- **MEMO** — the memo across the full width under those two, with a `2 / 7 DONE` count when it has task-list items. It's fitted like the memo screen but between the 8×13 and 7×13 faces, so it reads as a list rather than a poster.
 
 **Rate limits** come from the same endpoints the CLIs use for `/usage`. Sign the server in on **`/agents`** (linked from the editor and devices pages):
 

@@ -2,7 +2,7 @@
 //! header and footer as the dashboard.
 //!
 //! Text is set in Inconsolata (short notes, and H1) and the X11 fixed
-//! faces (10x20, 9x15, 8x13, 6x13). They're the u8g2 families that ship
+//! faces (10x20, 9x15, 8x13, 7x13). They're the u8g2 families that ship
 //! both a Latin cut (with €) and a Cyrillic cut with identical metrics, so
 //! a note mixing
 //! "Grüße" and "привет" renders in one consistent face. Typographic
@@ -133,7 +133,9 @@ fn tiers() -> [Tier; 5] {
     let x10 = || face!(15, 20; u8g2_font_10x20_te, u8g2_font_10x20_t_cyrillic);
     let x9 = || face!(12, 16; u8g2_font_9x15_te, u8g2_font_9x15_t_cyrillic);
     let x8 = || face!(11, 14; u8g2_font_8x13_te, u8g2_font_8x13_t_cyrillic);
-    let x6 = face!(10, 13; u8g2_font_6x13_te, u8g2_font_6x13_t_cyrillic);
+    // 7x13 rather than 6x13 at the bottom: same height, but a pixel wider
+    // per glyph, which is what keeps a dense memo readable from a chair away.
+    let x7 = face!(10, 14; u8g2_font_7x13_te, u8g2_font_7x13_t_cyrillic);
     // Inconsolata has no €; borrow it from 10x20 rather than print `?`.
     let inr24 =
         || face!(26, 34; u8g2_font_inr24_mf, u8g2_font_inr24_t_cyrillic, u8g2_font_10x20_te);
@@ -161,7 +163,7 @@ fn tiers() -> [Tier; 5] {
             h1_bold: true,
         },
         Tier {
-            body: x6,
+            body: x7,
             h1: x8(),
             h1_bold: true,
         },
