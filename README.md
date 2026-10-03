@@ -80,6 +80,7 @@ curl http://localhost:8080/refresh
 | `FIRMWARE_UPDATE` | _(on)_ | Set to `false` to stop offering the bundled firmware as an OTA update |
 | `FIRMWARE_MODEL` | `reterminal_e1002` | Device `Model` header the bundled firmware is offered to |
 | `FIRMWARE_DIR` | `/app/firmware` | Directory with `firmware.bin` + `version.txt` |
+| `STACKCHAN_TOKEN` | _(unset)_ | If set, `/api/stackchan/usage` requires `Authorization: Bearer <token>` |
 
 Upstream-specific env vars (leave blank to use the matching mock data) are documented in `docker-compose.yml`.
 
@@ -247,6 +248,7 @@ To add a real data source, extend `Sources::fetch` in `src/fetch.rs`. The mock d
 | `PATCH` / `DELETE` | `/api/devices/{mac}` | Rename / reassign a device (`{"name": …, "mode": "dashboard"\|"note"}`) / forget it |
 | `GET` | `/swagger` | Swagger UI for the memo, device, screen and ops endpoints (`/openapi.json`) |
 | `GET` / `PUT` | `/api/note` | Read the memo as JSON / replace it with the raw markdown body |
+| `GET` | `/api/stackchan/usage` | Claude usage for the Femto StackChan robot: session/week %, reset times, projection, pace, lockout. ETag/`If-None-Match` supported; `503` while no Claude account is signed in |
 | `GET` | `/refresh` | Force an immediate upstream re-fetch |
 | `GET` | `/health` | Health check |
 
