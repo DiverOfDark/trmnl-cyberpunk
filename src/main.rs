@@ -9,6 +9,7 @@ mod github;
 mod note;
 mod note_screen;
 mod render;
+mod stackchan;
 mod windows_tz;
 
 use std::sync::Arc;
@@ -40,7 +41,7 @@ use note::{NoteStore, Screen};
 // ── State ─────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-struct AppState {
+pub(crate) struct AppState {
     data: Arc<RwLock<DashData>>,
     sources: Arc<Sources>,
     /// Serializes upstream-fetch runs so a manual `/refresh` landing mid-cycle
@@ -616,12 +617,13 @@ async fn delete_device(State(state): State<AppState>, Path(mac): Path<String>) -
         description = "BYOS server for TRMNL e-ink panels. The device-protocol endpoints (`/api/setup`, `/api/display`, `/api/log`) and the cache-busted screen URLs (`/dashboard/{epoch}`, `/note/{epoch}`) are reachable too but are driven by the firmware, so they aren't part of this schema.",
         version = env!("CARGO_PKG_VERSION"),
     ),
-    paths(get_note, put_note, list_devices, patch_device, delete_device, list_agents, start_login, finish_claude, sign_out, serve_png, serve_note, serve_desk, force_refresh, health),
-    components(schemas(NoteDto, NoteSaved, DevicesDto, Device, DevicePatch, Mode, Screen, AgentDto, LoginStatus, Pending, PastedCode)),
+    paths(get_note, put_note, list_devices, patch_device, delete_device, list_agents, start_login, finish_claude, sign_out, serve_png, serve_note, serve_desk, force_refresh, health, stackchan::get_usage),
+    components(schemas(NoteDto, NoteSaved, DevicesDto, Device, DevicePatch, Mode, Screen, AgentDto, LoginStatus, Pending, PastedCode, stackchan::StackchanUsage, stackchan::Window)),
     tags(
         (name = "memo", description = "Read and write the memo screen's markdown"),
         (name = "devices", description = "Registered panels, their last status, and which screen each shows"),
         (name = "agents", description = "Claude / Codex sign-in for the desk screen"),
+        (name = "stackchan", description = "Claude usage for the Femto StackChan desk robot"),
         (name = "screens", description = "Rendered 800x480 panel images"),
         (name = "ops", description = "Refresh and health"),
     ),
@@ -701,6 +703,7 @@ async fn main() {
         .route("/desk/{device}/{epoch}", get(serve_device_desk))
         .route("/agents", get(agents_page))
         .route("/api/agents", get(list_agents))
+        .route("/api/stackchan/usage", get(stackchan::get_usage))
         .route("/api/agents/claude/code", post(finish_claude))
         .route("/api/agents/{provider}/login", post(start_login).delete(sign_out))
         .route("/firmware/{file}", get(serve_firmware))

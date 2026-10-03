@@ -179,6 +179,7 @@ secrets:
   actualbudgetKey: ""
   actualbudgetSyncId: ""
   actualbudgetPassword: ""
+  stackchanToken: ""      # bearer token for /api/stackchan/usage (empty = open)
 
 # Arbitrary Kubernetes manifests rendered alongside the chart. Each entry
 # is a full object (apiVersion/kind/metadata/spec/...). Templates inside
