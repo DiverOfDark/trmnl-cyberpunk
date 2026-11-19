@@ -2,6 +2,10 @@
 FROM rust:1-slim-bookworm AS builder
 WORKDIR /app
 
+# cargo-auditable embeds the resolved crate list in the binary (.dep-v0
+# section, survives strip) so Trivy can report Rust CVEs from the image.
+RUN cargo install cargo-auditable@0.7.7 --locked
+
 # Cache dependency build by copying only the manifests first, then a stub
 # main.rs. The dep layer is reused as long as Cargo.toml/Cargo.lock are stable.
 COPY Cargo.toml Cargo.lock ./
@@ -11,7 +15,7 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs \
 
 # Now the real source.
 COPY src ./src
-RUN cargo build --release --bin trmnl-cyberpunk
+RUN cargo auditable build --release --bin trmnl-cyberpunk
 
 # ── Stage 2: Patched TRMNL firmware (OTA update for the device) ──────────────
 # See firmware/build.sh. Layered for the CI layer cache (type=gha): the
